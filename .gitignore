@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+env/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Configuration files
+config/config.yaml
+
+# Logs and databases
+*.log
+*.db
+*.sqlite3
+app.log
+bot_output.log
+
+# Data files
+# data/ # Uncomment if you have a data directory to ignore
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+dehydrated/
+
+# Test outputs
+htmlcov/
+.pytest_cache/
+.tox/
+
