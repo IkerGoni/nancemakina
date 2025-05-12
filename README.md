@@ -5,9 +5,16 @@ A robust, configurable trading bot for Binance Futures markets (USDT-M and COIN-
 ## Features
 
 - **Multi-Market Support**: Trade on both USDT-M and COIN-M Binance Futures markets
-- **Configurable Strategy**: SMA crossover strategy (21 SMA crossing 200 SMA) with configurable parameters
+- **Advanced SMA Crossover Strategy**: Configurable moving averages with multiple validation filters:
+  - Buffer Time Filter: Requires consecutive candles to confirm crossover
+  - Volume Filter: Validates signals based on higher-than-average volume
+  - Volatility Filter: Ensures market volatility is within acceptable ranges
+- **Flexible Risk Management**:
+  - Multiple Stop Loss types: Pivot-based, Percentage-based, or ATR-based
+  - Multiple Take Profit types: Risk-Reward Ratio, Fixed Percentage, or ATR-based
+  - Fallback mechanisms when primary calculation methods fail
 - **Real-time Data Processing**: WebSocket connections for live market data
-- **Risk Management**: Configurable position sizing, stop-loss, and take-profit
+- **Position Sizing**: Configurable fixed or dynamic position sizing
 - **Monitoring**: Prometheus metrics for monitoring bot performance and health
 - **Hot-reload Configuration**: Update trading parameters without restarting the bot
 - **Extensible Architecture**: Modular design for easy addition of new strategies and features
@@ -45,46 +52,60 @@ A robust, configurable trading bot for Binance Futures markets (USDT-M and COIN-
 
 ## Configuration
 
-The bot is configured through the `config/config.yaml` file. See [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for detailed options.
+The bot is configured through the `config/config.yaml` file. Configuration includes:
 
-Basic configuration example:
+- API connections (with Testnet support)
+- Trading pairs configuration
+- Strategy parameters (SMA periods, signal intervals)
+- Advanced filters (Buffer Time, Volume, Volatility)
+- Stop Loss and Take Profit options
+- Risk management settings
+- Logging and monitoring
+
+See the comprehensive [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for detailed options and examples.
+
+For quick testing on Testnet, start with:
 
 ```yaml
 api:
-  binance_api_key: "YOUR_BINANCE_API_KEY"
-  binance_api_secret: "YOUR_BINANCE_API_SECRET"
+  binance_api_key: "YOUR_TESTNET_API_KEY"
+  binance_api_secret: "YOUR_TESTNET_API_SECRET"
+  testnet: true
 
 global_settings:
   v1_strategy:
-    sma_short_period: 21
-    sma_long_period: 200
-    min_signal_interval_minutes: 60
-    tp_sl_ratio: 2.0
-    default_margin_usdt: 50.0
-    default_leverage: 10
-    margin_mode: "ISOLATED"
-    indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"]
+    # Core strategy settings remain unchanged
+    
+    # Enable just one filter to start
+    filters:
+      buffer_time:
+        enabled: true
+        candles: 2
+      volume:
+        enabled: false
+      volatility:
+        enabled: false
+    
+    # Using pivot-based SL with percentage fallback
+    sl_options:
+      primary_type: "pivot"
+      enable_fallback: true
+      fallback_type: "percentage"
+    
+    # Simple risk-reward ratio for TP
+    tp_options:
+      primary_type: "rr_ratio"
+      rr_ratio_settings:
+        value: 2.0
 
 pairs:
   BTC_USDT:
     enabled: true
-    contract_type: "USDT_M"
     leverage: 5
-    margin_usdt: 100.0
-  ETH_USDT:
-    enabled: true
-    contract_type: "USDT_M"
-  BTCUSD_PERP:
-    enabled: false
-    contract_type: "COIN_M"
-    margin_coin: 0.001
+    margin_usdt: 50.0
 
 logging:
-  level: "INFO"
-  file: "logs/bot.log"
-
-monitoring:
-  prometheus_port: 8000
+  level: "DEBUG"  # Use DEBUG for maximum visibility during testing
 ```
 
 ## Running the Bot

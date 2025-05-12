@@ -4,80 +4,82 @@
 api:
   binance_api_key: "YOUR_BINANCE_API_KEY" # Your Binance API Key (ensure only Futures trading is enabled)
   binance_api_secret: "YOUR_BINANCE_API_SECRET" # Your Binance API Secret
+  testnet: false # Set to true to use Binance Futures Testnet instead of mainnet
   # For COIN-M, if different keys are needed, this structure might need adjustment or separate sections.
   # For now, assuming same keys for USD-M and COIN-M or that ccxt handles it.
 
 global_settings:
-  # V1 Strategy Defaults (SMA Crossover)
+  # V1 Strategy Configuration (SMA Crossover)
   v1_strategy:
-    sma_short_period: 21
-    sma_long_period: 200
-    # Minimum time in minutes between signals for the same pair to reduce noise
-    min_signal_interval_minutes: 15
-    # Take Profit = Risk * tp_sl_ratio. SL is based on recent support/resistance.
-    tp_sl_ratio: 3.0
-    # Default margin to use per trade if not specified per pair (for fixed margin allocation)
-    default_margin_usdt: 50.0 # For USDT-M pairs
-    # default_margin_coin: 0.1 # Example for COIN-M pairs (e.g., 0.1 BTC for BTCUSD_PERP)
-    # Default leverage if not specified per pair
-    default_leverage: 10
-    # Default margin mode: "ISOLATED" or "CROSSED"
-    margin_mode: "ISOLATED"
-    # Fallback SL percentage when pivot-based SL calculation fails or gives invalid results
-    # DEPRECATED: Use sl_options.percentage_settings.value instead
-    fallback_sl_percentage: 0.02 # Default 2% from entry
-    # Timeframes to calculate SMAs on (e.g., 1m, 5m, 15m, 1h, 4h). V1 uses 1m for signals.
-    # The data_processor will calculate for all these, signal_engine_v1 will use 1m.
-    indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"]
+    # Core Strategy Parameters
+    sma_short_period: 21 # Short period for SMA calculation
+    sma_long_period: 200 # Long period for SMA calculation
+    min_signal_interval_minutes: 15 # Minimum time between signals for the same pair
+    tp_sl_ratio: 3.0 # DEPRECATED: Use tp_options.rr_ratio_settings.value instead
+    default_margin_usdt: 50.0 # Default margin per trade for USDT-M pairs
+    default_leverage: 10 # Default leverage for all pairs
+    margin_mode: "ISOLATED" # Margin mode: "ISOLATED" or "CROSSED"
+    fallback_sl_percentage: 0.02 # DEPRECATED: Use sl_options.percentage_settings.value instead
+    indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"] # Timeframes to calculate indicators on
     
-    # New configurable filters
+    # Signal Filters - Add conditions to reduce false signals
     filters:
-      # Buffer Time Filter - requires consecutive candles to confirm a crossover
+      # Buffer Time Filter - Requires consecutive candles to confirm a crossover
       buffer_time:
-        enabled: false  # Set to true to activate buffer time filter
-        candles: 2      # Number of consecutive candles required to confirm signal
+        enabled: false # Set to true to activate buffer time filter
+        candles: 2 # Number of consecutive candles required to confirm signal
       
-      # Volume Filter - requires higher than average volume for valid signals
+      # Volume Filter - Requires higher than average volume for valid signals
       volume:
-        enabled: false  # Set to true to activate volume filter
-        lookback_periods: 20   # Number of candles to look back for average calculation
-        min_threshold: 1.5     # Minimum volume as multiplier of average (e.g., 1.5x average)
+        enabled: false # Set to true to activate volume filter
+        lookback_periods: 20 # Number of candles to calculate average volume
+        min_threshold: 1.5 # Minimum volume as multiplier of average (e.g., 1.5x average)
       
-      # Volatility Filter - requires adequate volatility for valid signals
+      # Volatility Filter - Requires adequate volatility for valid signals
       volatility:
-        enabled: false  # Set to true to activate volatility filter
-        indicator: "atr"  # Indicator to use: "atr", "bb_width", etc.
-        lookback_periods: 14   # Lookback period for volatility calculation
-        min_threshold: 0.002   # Minimum volatility as percentage of price
-        max_threshold: 0.05    # Maximum volatility as percentage of price
+        enabled: false # Set to true to activate volatility filter
+        indicator: "atr" # Indicator to use: currently only "atr" is supported
+        lookback_periods: 14 # Lookback period for ATR calculation
+        min_threshold: 0.002 # Minimum volatility as percentage of price (0.2%)
+        max_threshold: 0.05 # Maximum volatility as percentage of price (5%)
     
     # Stop Loss configuration options
     sl_options:
-      primary_type: "pivot"  # Options: "pivot", "percentage"
+      primary_type: "pivot" # Options: "pivot", "percentage", "atr"
       
       # Settings for pivot-based stop loss
       pivot_settings:
-        lookback_candles: 30  # Number of candles to look back for pivot point
+        lookback_candles: 30 # Number of candles to look back for pivot points
       
       # Settings for percentage-based stop loss
       percentage_settings:
-        value: 0.02  # Stop loss as percentage of entry price (2%)
+        value: 0.02 # Stop loss as percentage of entry price (2%)
       
-      # Fallback settings when primary method fails or gives invalid results
-      enable_fallback: true  # Whether to use fallback method if primary fails
-      fallback_type: "percentage"  # Currently only "percentage" is supported
+      # Settings for ATR-based stop loss
+      atr_settings:
+        multiplier: 2.0 # Multiplier applied to ATR value
+        lookback_periods: 14 # Number of candles for ATR calculation
+      
+      # Fallback settings when primary method fails
+      enable_fallback: true # Whether to use fallback method if primary fails
+      fallback_type: "percentage" # Currently only "percentage" is supported
     
     # Take Profit configuration options
     tp_options:
-      primary_type: "rr_ratio"  # Options: "rr_ratio", "fixed_percentage"
+      primary_type: "rr_ratio" # Options: "rr_ratio", "fixed_percentage", "atr"
       
       # Settings for risk-reward ratio based take profit
       rr_ratio_settings:
-        value: 3.0  # Take profit at 3x the risk (entry to stop loss distance)
+        value: 3.0 # Take profit at 3x the risk (entry to stop loss distance)
       
       # Settings for fixed percentage based take profit
       fixed_percentage_settings:
-        value: 0.06  # Take profit at 6% from entry price
+        value: 0.06 # Take profit at 6% from entry price
+      
+      # Settings for ATR-based take profit
+      atr_settings:
+        multiplier: 4.0 # Multiplier applied to ATR value
+        lookback_periods: 14 # Number of candles for ATR calculation
 
   # V2 Strategy Defaults (to be detailed in Phase 2/3)
   # v2_strategy:
@@ -93,7 +95,7 @@ global_settings:
     # volatility_based_leverage_enabled: false # Future enhancement
 
 pairs:
-  # USD-M Perpetual Contracts (Examples)
+  # Example configuration for trading pairs
   BTC_USDT:
     enabled: true
     # Override global V1 settings if needed
@@ -101,8 +103,6 @@ pairs:
     # margin_mode: "CROSSED"
     # leverage: 20
     # margin_usdt: 100 # Specific margin for this USDT-M pair
-    # dynamic_sizing_enabled: true # Override global dynamic sizing
-    # risk_percent_per_trade: 0.5 # Override global risk percent
     
     # Pair-specific filter overrides
     # filters:
@@ -128,34 +128,24 @@ pairs:
     # leverage: 15
     # margin_usdt: 75
 
-  # COIN-M Perpetual Contracts (Examples)
-  # Note: For COIN-M, margin is specified in the base currency (e.g., BTC for BTCUSD_PERP)
-  # The bot will need to handle this distinction for position sizing and P&L.
+  # COIN-M Perpetual Contracts Example
   BTCUSD_PERP: # Binance symbol for BTC/USD COIN-M Perpetual
     enabled: false
     # margin_coin: 0.01 # e.g., 0.01 BTC for this pair
     # leverage: 10
-    # contract_type: "COIN_M" # Explicitly marking, though symbol format might imply it
-
-  ETHUSD_PERP:
-    enabled: false
-    # margin_coin: 0.1 # e.g., 0.1 ETH
-    # leverage: 10
-    # contract_type: "COIN_M"
 
 logging:
   # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
   level: "INFO"
-  # Log file path (optional, if not specified, logs to console and default app.log)
-  # log_file: "/path/to/your/custom_app.log"
+  # log_file: "logs/bot.log" # Optional file path for logs (omit for console only)
 
 monitoring:
   prometheus_port: 8000 # Port for Prometheus metrics endpoint
 
-backtesting: # Configuration for backtesting module (future phase)
-  initial_balance_usdt: 10000
-  fee_percent: 0.04    # 0.04% trading fee (taker)
-  slippage_percent: 0.01 # 0.01% slippage
+backtesting: # Configuration for backtesting module
+  initial_balance_usdt: 10000 # Starting balance for backtests
+  fee_percent: 0.04 # 0.04% trading fee (taker)
+  slippage_percent: 0.01 # 0.01% simulated slippage
   # start_date: "2023-01-01T00:00:00Z"
   # end_date: "2023-12-31T23:59:59Z"
   # initial_balance_coin: { "BTC": 1, "ETH": 10 } # For COIN-M backtesting
