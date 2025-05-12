@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from typing import Optional, Dict, Any, Tuple
 import math
 
@@ -301,7 +302,7 @@ class OrderManager:
 
 # Example Usage (for integration testing, not standalone run)
 async def main_order_manager_test():
-    logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(name)s - %(levelname)s - %(message)s\')
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     
     class MockConfigManager:
         def get_config(self):

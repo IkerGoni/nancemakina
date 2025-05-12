@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 import pandas as pd
+import time
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.config_loader import ConfigManager
@@ -25,7 +26,12 @@ def mock_config_manager_for_se():
             "ETH_USDT": {
                 "enabled": True, 
                 "contract_type": "USDT_M",
-                "min_signal_interval_minutes": 0 # For testing without wait
+                "min_signal_interval_minutes": 0  # For testing without wait
+            },
+            "SOL_USDT": {
+                "enabled": True,
+                "contract_type": "USDT_M",
+                "tp_sl_ratio": 3.5  # Custom R:R ratio for testing
             }
         }
     }
@@ -44,18 +50,18 @@ def signal_engine_v1(mock_config_manager_for_se, mock_data_processor_for_se):
 def create_mock_df(sma_short_prev, sma_long_prev, sma_short_curr, sma_long_curr, close_curr=100, low_lookback=[90,91,89], high_lookback=[110,109,111]):
     # Ensure lookback arrays are long enough for pivot logic if needed
     # Create enough past data for pivot calculation (e.g., 30 candles)
-    past_lows = low_lookback * 10 # Repeat to make it 30 long
+    past_lows = low_lookback * 10  # Repeat to make it 30 long
     past_highs = high_lookback * 10
-    past_closes = [close_curr - 1] * 30 # Dummy past closes
+    past_closes = [close_curr - 1] * 30  # Dummy past closes
 
     data = {
-        "timestamp": list(range(1000, 32000, 1000)), # 31 points for previous, 1 for current
+        "timestamp": list(range(1000, 32000, 1000)),  # 31 points for previous, 1 for current
         "open": [close_curr-1]*30 + [close_curr-1, close_curr-0.5],
         "high": past_highs + [max(high_lookback), close_curr + 2],
         "low": past_lows + [min(low_lookback), close_curr - 2],
         "close": past_closes + [close_curr-1, close_curr],
         "volume": [100]*32,
-        "is_closed": [True]*31 + [True], # Current candle is also closed for signal generation
+        "is_closed": [True]*31 + [True],  # Current candle is also closed for signal generation
         "sma_short": [sma_short_prev -1]*30 + [sma_short_prev, sma_short_curr],
         "sma_long": [sma_long_prev-1]*30 + [sma_long_prev, sma_long_curr],
     }
@@ -63,22 +69,95 @@ def create_mock_df(sma_short_prev, sma_long_prev, sma_short_curr, sma_long_curr,
     df.set_index("timestamp", inplace=True)
     return df
 
+# Helper to create a shorter DataFrame with specific values
+def create_limited_df(rows=5, with_na=False):
+    """Creates a small DataFrame with limited rows - useful for testing insufficient data scenarios"""
+    data = {
+        "timestamp": list(range(1000, 1000 + rows * 1000, 1000)),
+        "open": [99] * rows,
+        "high": [101] * rows,
+        "low": [98] * rows,
+        "close": [100] * rows,
+        "volume": [100] * rows,
+        "is_closed": [True] * rows,
+        "sma_short": [99] * rows,
+        "sma_long": [100] * rows
+    }
+    
+    # Set some values to NA if requested
+    if with_na:
+        data["sma_short"][-1] = pd.NA
+    
+    df = pd.DataFrame(data)
+    df.set_index("timestamp", inplace=True)
+    return df
+
+# 1. Test Signal Generation Logic
 @pytest.mark.asyncio
 async def test_se_no_signal_if_not_enough_data(signal_engine_v1, mock_data_processor_for_se):
-    mock_data_processor_for_se.get_indicator_dataframe.return_value = pd.DataFrame() # Empty DF
+    # Test with empty DataFrame
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = pd.DataFrame()  # Empty DF
     signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
     assert signal is None
 
-    mock_data_processor_for_se.get_indicator_dataframe.return_value = create_mock_df(10,20,11,19)[:1] # Only one row
+    # Test with None DataFrame
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = None
+    signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    assert signal is None
+
+    # Test with only one row
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = create_mock_df(10,20,11,19)[:1]  # Only one row
     signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
     assert signal is None
 
 @pytest.mark.asyncio
 async def test_se_no_signal_if_sma_na(signal_engine_v1, mock_data_processor_for_se):
-    df_with_na = create_mock_df(10,20,11,19)
+    # Test with NA in latest SMA short
+    df_with_na = create_mock_df(10, 20, 11, 19)
     df_with_na.loc[df_with_na.index[-1], "sma_short"] = pd.NA
     mock_data_processor_for_se.get_indicator_dataframe.return_value = df_with_na
     signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    assert signal is None
+
+    # Test with NA in latest SMA long
+    df_with_na = create_mock_df(10, 20, 11, 19)
+    df_with_na.loc[df_with_na.index[-1], "sma_long"] = pd.NA
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df_with_na
+    signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    assert signal is None
+
+    # Test with NA in previous SMA short
+    df_with_na = create_mock_df(10, 20, 11, 19)
+    df_with_na.loc[df_with_na.index[-2], "sma_short"] = pd.NA
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df_with_na
+    signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    assert signal is None
+
+    # Test with NA in previous SMA long
+    df_with_na = create_mock_df(10, 20, 11, 19)
+    df_with_na.loc[df_with_na.index[-2], "sma_long"] = pd.NA
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df_with_na
+    signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    assert signal is None
+
+@pytest.mark.asyncio
+async def test_se_no_signal_if_no_crossover(signal_engine_v1, mock_data_processor_for_se):
+    # Test when short > long, and still short > long (no crossover)
+    mock_df = create_mock_df(sma_short_prev=101, sma_long_prev=100, sma_short_curr=102, sma_long_curr=99)
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is None
+
+    # Test when short < long, and still short < long (no crossover)
+    mock_df = create_mock_df(sma_short_prev=99, sma_long_prev=100, sma_short_curr=98, sma_long_curr=101)
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is None
+
+    # Test when short = long, and still short = long (no crossover)
+    mock_df = create_mock_df(sma_short_prev=100, sma_long_prev=100, sma_short_curr=100, sma_long_curr=100)
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
     assert signal is None
 
 @pytest.mark.asyncio
@@ -87,17 +166,26 @@ async def test_se_long_signal_sma_crossover(signal_engine_v1, mock_data_processo
     mock_df = create_mock_df(sma_short_prev=99, sma_long_prev=100, sma_short_curr=101, sma_long_curr=100, close_curr=100.5, low_lookback=[90,88,89])
     mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
     
-    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT") # ETH_USDT has min_interval 0
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")  # ETH_USDT has min_interval 0
     assert signal is not None
     assert signal.direction == TradeDirection.LONG
     assert signal.symbol == "ETHUSDT"
-    assert signal.entry_price == 100.5 # latest close
-    assert signal.stop_loss_price == 88 # min of low_lookback
+    assert signal.config_symbol == "ETH_USDT"
+    assert signal.contract_type == "USDT_M"
+    assert signal.entry_price == 100.5  # latest close
+    assert signal.stop_loss_price == 88  # min of low_lookback
     # Risk = 100.5 - 88 = 12.5. TP = 100.5 + (12.5 * 2.0) = 100.5 + 25 = 125.5
     assert signal.take_profit_price == 125.5
     assert signal.strategy_name == "V1_SMA_Crossover"
     assert signal.signal_kline is not None
     assert signal.signal_kline.close == 100.5
+    assert signal.signal_kline.timestamp == mock_df.index[-1]
+    assert signal.details is not None
+    assert signal.details["sma_short_at_signal"] == 101
+    assert signal.details["sma_long_at_signal"] == 100
+    assert signal.details["sma_short_previous"] == 99
+    assert signal.details["sma_long_previous"] == 100
+    assert signal.details["pivot_used_for_sl"] == 88
 
 @pytest.mark.asyncio
 async def test_se_short_signal_sma_crossover(signal_engine_v1, mock_data_processor_for_se):
@@ -109,23 +197,142 @@ async def test_se_short_signal_sma_crossover(signal_engine_v1, mock_data_process
     assert signal is not None
     assert signal.direction == TradeDirection.SHORT
     assert signal.symbol == "ETHUSDT"
+    assert signal.config_symbol == "ETH_USDT"
     assert signal.entry_price == 99.5
-    assert signal.stop_loss_price == 112 # max of high_lookback
+    assert signal.stop_loss_price == 112  # max of high_lookback
     # Risk = 112 - 99.5 = 12.5. TP = 99.5 - (12.5 * 2.0) = 99.5 - 25 = 74.5
     assert signal.take_profit_price == 74.5
+    assert signal.signal_kline is not None
+    assert signal.signal_kline.close == 99.5
+    assert signal.details is not None
+    assert signal.details["sma_short_at_signal"] == 99
+    assert signal.details["sma_long_at_signal"] == 100
+    assert signal.details["sma_short_previous"] == 101
+    assert signal.details["sma_long_previous"] == 100
+    assert signal.details["pivot_used_for_sl"] == 112
+
+# 2. Test SL/TP Calculation
+@pytest.mark.asyncio
+async def test_se_sl_tp_calculation_long(signal_engine_v1, mock_data_processor_for_se):
+    # Test a more complex case with specific pivot lows
+    low_lookback = [90, 88, 89, 85, 87]  # The pivot low should be 85
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5, 
+        low_lookback=low_lookback
+    )
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is not None
+    assert signal.direction == TradeDirection.LONG
+    assert signal.stop_loss_price == 85  # min of low_lookback
+    # Risk = 100.5 - 85 = 15.5. TP = 100.5 + (15.5 * 2.0) = 100.5 + 31 = 131.5
+    assert signal.take_profit_price == 131.5
 
 @pytest.mark.asyncio
-async def test_se_no_signal_if_no_crossover(signal_engine_v1, mock_data_processor_for_se):
-    # short > long, and still short > long
-    mock_df = create_mock_df(sma_short_prev=101, sma_long_prev=100, sma_short_curr=102, sma_long_curr=99)
+async def test_se_sl_tp_calculation_short(signal_engine_v1, mock_data_processor_for_se):
+    # Test a more complex case with specific pivot highs
+    high_lookback = [110, 112, 115, 111, 113]  # The pivot high should be 115
+    mock_df = create_mock_df(
+        sma_short_prev=101, sma_long_prev=100, 
+        sma_short_curr=99, sma_long_curr=100, 
+        close_curr=99.5, 
+        high_lookback=high_lookback
+    )
     mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is not None
+    assert signal.direction == TradeDirection.SHORT
+    assert signal.stop_loss_price == 115  # max of high_lookback
+    # Risk = 115 - 99.5 = 15.5. TP = 99.5 - (15.5 * 2.0) = 99.5 - 31 = 68.5
+    assert signal.take_profit_price == 68.5
+
+@pytest.mark.asyncio
+async def test_se_custom_tp_sl_ratio(signal_engine_v1, mock_data_processor_for_se):
+    # Test TP calculation with a custom R:R ratio for SOL_USDT (3.5)
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5, 
+        low_lookback=[90, 88, 89]
+    )
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    
+    signal = await signal_engine_v1.check_signal("SOLUSDT", "SOL_USDT")
+    assert signal is not None
+    assert signal.direction == TradeDirection.LONG
+    assert signal.stop_loss_price == 88
+    # Risk = 100.5 - 88 = 12.5. TP = 100.5 + (12.5 * 3.5) = 100.5 + 43.75 = 144.25
+    assert signal.take_profit_price == 144.25
+
+@pytest.mark.asyncio
+async def test_se_no_signal_if_insufficient_pivot_data(signal_engine_v1, mock_data_processor_for_se):
+    # Create a DataFrame that's too small for proper pivot calculation (< 3 rows)
+    small_df = create_limited_df(rows=2)
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = small_df
+    
     signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
     assert signal is None
 
 @pytest.mark.asyncio
-async def test_se_signal_interval_filter(signal_engine_v1, mock_data_processor_for_se, mock_config_manager_for_se):
+async def test_se_sl_tp_calculation_invalid_risk(signal_engine_v1, mock_data_processor_for_se):
+    # SL is worse than entry for LONG (pivot low > entry price)
+    mock_df_bad_sl_long = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=90, 
+        low_lookback=[95, 96, 97]  # min low is 95, which is > entry price 90
+    )
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df_bad_sl_long
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is None
+
+    # SL is worse than entry for SHORT (pivot high < entry price)
+    mock_df_bad_sl_short = create_mock_df(
+        sma_short_prev=101, sma_long_prev=100, 
+        sma_short_curr=99, sma_long_curr=100, 
+        close_curr=110, 
+        high_lookback=[105, 106, 104]  # max high is 106, which is < entry price 110
+    )
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df_bad_sl_short
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is None
+
+@pytest.mark.asyncio
+async def test_se_long_signal_signal_kline_content(signal_engine_v1, mock_data_processor_for_se):
+    # Test that signal_kline contains the correct data from the last DataFrame row
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    assert signal is not None
+    assert signal.signal_kline is not None
+    assert signal.signal_kline.timestamp == mock_df.index[-1]
+    assert signal.signal_kline.open == mock_df.iloc[-1]["open"]
+    assert signal.signal_kline.high == mock_df.iloc[-1]["high"]
+    assert signal.signal_kline.low == mock_df.iloc[-1]["low"]
+    assert signal.signal_kline.close == mock_df.iloc[-1]["close"]
+    assert signal.signal_kline.volume == mock_df.iloc[-1]["volume"]
+    assert signal.signal_kline.is_closed == mock_df.iloc[-1]["is_closed"]
+    assert signal.signal_kline.symbol == "ETHUSDT"
+    assert signal.signal_kline.interval == "1m"  # The default interval used by SignalEngineV1
+
+# 3. Test Filters
+@pytest.mark.asyncio
+async def test_se_signal_interval_filter(signal_engine_v1, mock_data_processor_for_se):
     # BTC_USDT has min_interval_minutes = 15
-    mock_df = create_mock_df(sma_short_prev=99, sma_long_prev=100, sma_short_curr=101, sma_long_curr=100, close_curr=100.5)
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
     mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
 
     # First signal should pass
@@ -138,32 +345,79 @@ async def test_se_signal_interval_filter(signal_engine_v1, mock_data_processor_f
     assert signal2 is None
 
     # Simulate time passing (less than interval)
-    signal_engine_v1.last_signal_time["BTCUSDT"] = time.time() - (10 * 60) # 10 minutes ago
+    signal_engine_v1.last_signal_time["BTCUSDT"] = time.time() - (10 * 60)  # 10 minutes ago
     signal3 = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
     assert signal3 is None 
 
     # Simulate time passing (more than interval)
-    signal_engine_v1.last_signal_time["BTCUSDT"] = time.time() - (20 * 60) # 20 minutes ago
+    signal_engine_v1.last_signal_time["BTCUSDT"] = time.time() - (20 * 60)  # 20 minutes ago
     signal4 = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
     assert signal4 is not None
 
 @pytest.mark.asyncio
-async def test_se_sl_tp_calculation_invalid_risk(signal_engine_v1, mock_data_processor_for_se):
-    # SL is worse than entry for LONG
-    mock_df_bad_sl_long = create_mock_df(99,100,101,100, close_curr=90, low_lookback=[95,96,97]) # entry 90, pivot_low 95
-    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df_bad_sl_long
-    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
-    assert signal is None
+async def test_se_signal_interval_is_pair_specific(signal_engine_v1, mock_data_processor_for_se):
+    # Setup: BTC_USDT has interval=15, ETH_USDT has interval=0
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    
+    # Generate signals for both pairs
+    btc_signal = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    eth_signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Both should work the first time
+    assert btc_signal is not None
+    assert eth_signal is not None
+    
+    # Try immediate second signals
+    btc_signal2 = await signal_engine_v1.check_signal("BTCUSDT", "BTC_USDT")
+    eth_signal2 = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # BTC should be filtered, ETH should still generate (interval=0)
+    assert btc_signal2 is None
+    assert eth_signal2 is not None
 
-    # SL is worse than entry for SHORT
-    mock_df_bad_sl_short = create_mock_df(101,100,99,100, close_curr=110, high_lookback=[105,106,104]) # entry 110, pivot_high 106
-    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df_bad_sl_short
-    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
-    assert signal is None
+# 4. Test Helper Methods
+@pytest.mark.asyncio
+async def test_se_get_pair_specific_config(signal_engine_v1):
+    # Test getting config for BTC_USDT (uses global values)
+    btc_config = signal_engine_v1._get_pair_specific_config("BTC_USDT")
+    assert btc_config["sma_short_period"] == 3
+    assert btc_config["sma_long_period"] == 5
+    assert btc_config["min_signal_interval_minutes"] == 15
+    assert btc_config["tp_sl_ratio"] == 2.0
+    assert btc_config["contract_type"] == "USDT_M"
+    
+    # Test getting config for ETH_USDT (has custom min_signal_interval_minutes)
+    eth_config = signal_engine_v1._get_pair_specific_config("ETH_USDT")
+    assert eth_config["sma_short_period"] == 3
+    assert eth_config["sma_long_period"] == 5
+    assert eth_config["min_signal_interval_minutes"] == 0  # Overridden
+    assert eth_config["tp_sl_ratio"] == 2.0
+    assert eth_config["contract_type"] == "USDT_M"
+    
+    # Test getting config for SOL_USDT (has custom tp_sl_ratio)
+    sol_config = signal_engine_v1._get_pair_specific_config("SOL_USDT")
+    assert sol_config["sma_short_period"] == 3
+    assert sol_config["sma_long_period"] == 5
+    assert sol_config["min_signal_interval_minutes"] == 15
+    assert sol_config["tp_sl_ratio"] == 3.5  # Overridden
+    assert sol_config["contract_type"] == "USDT_M"
+    
+    # Test getting config for unknown pair (should use global values)
+    unknown_config = signal_engine_v1._get_pair_specific_config("XRP_USDT")
+    assert unknown_config["sma_short_period"] == 3
+    assert unknown_config["sma_long_period"] == 5
+    assert unknown_config["min_signal_interval_minutes"] == 15
+    assert unknown_config["tp_sl_ratio"] == 2.0
+    assert unknown_config["contract_type"] == "USDT_M"
 
 @pytest.mark.asyncio
 async def test_se_find_recent_pivot_logic(signal_engine_v1):
-    # Test _find_recent_pivot directly (it is a protected method, but crucial)
+    # Test _find_recent_pivot directly (it's a protected method, but crucial)
     data = {
         "timestamp": range(10), 
         "low": [10, 8, 9, 7, 10, 6, 8, 9, 7, 11],
@@ -172,18 +426,42 @@ async def test_se_find_recent_pivot_logic(signal_engine_v1):
     }
     df = pd.DataFrame(data).set_index("timestamp")
     
-    # For LONG, look for min low in lookback (excluding last candle)
-    # If df is passed as klines_df, it looks at df.iloc[-lookback-1:-1]
-    # If df has 10 rows, and lookback is 5. It looks at rows from index 3 up to 8 (exclusive of 9)
-    # df.iloc[10-5-1 : -1] = df.iloc[4:-1] = indices 4,5,6,7,8
-    # lows: 10, 6, 8, 9, 7. Min is 6.
-    pivot_l = signal_engine_v1._find_recent_pivot(df, lookback=5, direction=TradeDirection.LONG)
-    assert pivot_l == 6 
-
-    # For SHORT, look for max high in lookback
-    # highs: 20, 24, 22, 21, 23. Max is 24.
-    pivot_h = signal_engine_v1._find_recent_pivot(df, lookback=5, direction=TradeDirection.SHORT)
-    assert pivot_h == 24
-
-    assert signal_engine_v1._find_recent_pivot(df[:2], lookback=5, direction=TradeDirection.LONG) is None # Not enough data
+    # Test for LONG direction with different lookbacks
+    # For lookback=5, it should look at indices 4,5,6,7,8 (lows: 10, 6, 8, 9, 7). Min is 6.
+    pivot_l_5 = signal_engine_v1._find_recent_pivot(df, lookback=5, direction=TradeDirection.LONG)
+    assert pivot_l_5 == 6
+    
+    # For lookback=3, it should look at indices 6,7,8 (lows: 8, 9, 7). Min is 7.
+    pivot_l_3 = signal_engine_v1._find_recent_pivot(df, lookback=3, direction=TradeDirection.LONG)
+    assert pivot_l_3 == 7
+    
+    # Test for SHORT direction with different lookbacks
+    # For lookback=5, it should look at indices 4,5,6,7,8 (highs: 20, 24, 22, 21, 23). Max is 24.
+    pivot_h_5 = signal_engine_v1._find_recent_pivot(df, lookback=5, direction=TradeDirection.SHORT)
+    assert pivot_h_5 == 24
+    
+    # For lookback=3, it should look at indices 6,7,8 (highs: 22, 21, 23). Max is 23.
+    pivot_h_3 = signal_engine_v1._find_recent_pivot(df, lookback=3, direction=TradeDirection.SHORT)
+    assert pivot_h_3 == 23
+    
+    # Test with insufficient data
+    assert signal_engine_v1._find_recent_pivot(df[:2], lookback=5, direction=TradeDirection.LONG) is None
+    
+    # Test with exactly 3 rows (minimum required)
+    three_row_df = df[:3]
+    pivot_l_min = signal_engine_v1._find_recent_pivot(three_row_df, lookback=5, direction=TradeDirection.LONG)
+    assert pivot_l_min == 8  # Min of [10, 8]
+    
+    # Test with flat values
+    flat_data = {
+        "timestamp": range(5),
+        "low": [10, 10, 10, 10, 10],
+        "high": [20, 20, 20, 20, 20],
+        "is_closed": [True]*5
+    }
+    flat_df = pd.DataFrame(flat_data).set_index("timestamp")
+    pivot_l_flat = signal_engine_v1._find_recent_pivot(flat_df, lookback=3, direction=TradeDirection.LONG)
+    assert pivot_l_flat == 10
+    pivot_h_flat = signal_engine_v1._find_recent_pivot(flat_df, lookback=3, direction=TradeDirection.SHORT)
+    assert pivot_h_flat == 20
 

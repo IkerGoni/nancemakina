@@ -5,7 +5,7 @@ from threading import RLock
 
 from src.config_loader import ConfigManager
 from src.position_manager import PositionManager
-from src.models import Position, Order, OrderStatus, TradeDirection
+from src.models import Position, Order, OrderStatus, TradeDirection, OrderType, OrderSide
 
 @pytest.fixture
 def mock_config_manager_for_pm():
@@ -16,6 +16,15 @@ def mock_config_manager_for_pm():
 @pytest.fixture
 def position_manager(mock_config_manager_for_pm):
     return PositionManager(config_manager=mock_config_manager_for_pm)
+
+@pytest.mark.asyncio
+async def test_pm_empty_state(position_manager):
+    """Test that a new PositionManager returns correct values when empty."""
+    # Verify getters return correct values when empty
+    assert position_manager.get_position("BTCUSDT") is None
+    assert position_manager.get_all_positions() == []
+    assert position_manager.has_open_position("BTCUSDT") is False
+    assert position_manager.has_open_position("ETHUSDT") is False
 
 @pytest.mark.asyncio
 async def test_pm_add_get_position(position_manager):
@@ -101,7 +110,7 @@ async def test_pm_update_position_on_entry_order_fill(position_manager):
     
     # Simulate entry order fill with different fill price
     entry_order_fill = Order(
-        order_id="entry1", symbol="BTCUSDT", type="MARKET", side="BUY",
+        order_id="entry1", symbol="BTCUSDT", type=OrderType.MARKET, side=OrderSide.BUY,
         quantity=0.01, status=OrderStatus.FILLED, timestamp=1234567890,
         avg_fill_price=50100.0, filled_quantity=0.01
     )
@@ -123,7 +132,7 @@ async def test_pm_update_position_on_sl_order_fill(position_manager):
     
     # Simulate SL order fill
     sl_order_fill = Order(
-        order_id="sl1", symbol="BTCUSDT", type="STOP_MARKET", side="SELL",
+        order_id="sl1", symbol="BTCUSDT", type=OrderType.STOP_MARKET, side=OrderSide.SELL,
         quantity=0.01, status=OrderStatus.FILLED, timestamp=1234567890,
         avg_fill_price=49000.0, filled_quantity=0.01
     )
@@ -144,7 +153,7 @@ async def test_pm_update_position_on_tp_order_fill(position_manager):
     
     # Simulate TP order fill
     tp_order_fill = Order(
-        order_id="tp1", symbol="BTCUSDT", type="TAKE_PROFIT_MARKET", side="SELL",
+        order_id="tp1", symbol="BTCUSDT", type=OrderType.TAKE_PROFIT_MARKET, side=OrderSide.SELL,
         quantity=0.01, status=OrderStatus.FILLED, timestamp=1234567890,
         avg_fill_price=52000.0, filled_quantity=0.01
     )
@@ -165,7 +174,7 @@ async def test_pm_update_position_on_order_cancel(position_manager):
     
     # Simulate SL order cancellation
     sl_order_cancel = Order(
-        order_id="sl1", symbol="BTCUSDT", type="STOP_MARKET", side="SELL",
+        order_id="sl1", symbol="BTCUSDT", type=OrderType.STOP_MARKET, side=OrderSide.SELL,
         quantity=0.01, status=OrderStatus.CANCELED, timestamp=1234567890
     )
     await position_manager.update_position_on_order_update(sl_order_cancel)
@@ -187,7 +196,7 @@ async def test_pm_update_position_on_entry_order_cancel(position_manager):
     
     # Simulate entry order cancellation
     entry_order_cancel = Order(
-        order_id="entry1", symbol="BTCUSDT", type="MARKET", side="BUY",
+        order_id="entry1", symbol="BTCUSDT", type=OrderType.MARKET, side=OrderSide.BUY,
         quantity=0.01, status=OrderStatus.CANCELED, timestamp=1234567890
     )
     await position_manager.update_position_on_order_update(entry_order_cancel)
@@ -207,7 +216,7 @@ async def test_pm_update_position_on_order_reject(position_manager):
     
     # Simulate TP order rejection
     tp_order_reject = Order(
-        order_id="tp1", symbol="BTCUSDT", type="TAKE_PROFIT_MARKET", side="SELL",
+        order_id="tp1", symbol="BTCUSDT", type=OrderType.TAKE_PROFIT_MARKET, side=OrderSide.SELL,
         quantity=0.01, status=OrderStatus.REJECTED, timestamp=1234567890
     )
     await position_manager.update_position_on_order_update(tp_order_reject)
@@ -216,6 +225,51 @@ async def test_pm_update_position_on_order_reject(position_manager):
     updated_pos = position_manager.get_position("BTCUSDT")
     assert updated_pos.tp_order_id is None
     assert updated_pos.sl_order_id == "sl1"  # SL order should still be there
+
+@pytest.mark.asyncio
+async def test_pm_update_position_on_unrelated_order(position_manager):
+    """Test that unrelated order updates don't affect positions."""
+    # Add a position
+    pos_data = Position(
+        symbol="BTCUSDT", contract_type="USDT_M", side=TradeDirection.LONG,
+        entry_price=50000.0, quantity=0.01, entry_order_id="entry1",
+        sl_order_id="sl1", tp_order_id="tp1"
+    )
+    await position_manager.add_or_update_position(pos_data)
+    
+    # Create a snapshot of the position before the update
+    original_pos = position_manager.get_position("BTCUSDT")
+    
+    # Simulate an order update with an unrelated order ID
+    unrelated_order = Order(
+        order_id="unrelated123", symbol="BTCUSDT", type=OrderType.MARKET, side=OrderSide.BUY,
+        quantity=0.01, status=OrderStatus.FILLED, timestamp=1234567890
+    )
+    await position_manager.update_position_on_order_update(unrelated_order)
+    
+    # Verify position state remains unchanged
+    updated_pos = position_manager.get_position("BTCUSDT")
+    assert updated_pos.entry_order_id == original_pos.entry_order_id
+    assert updated_pos.sl_order_id == original_pos.sl_order_id
+    assert updated_pos.tp_order_id == original_pos.tp_order_id
+    assert updated_pos.entry_price == original_pos.entry_price
+
+@pytest.mark.asyncio
+async def test_pm_update_position_on_order_for_nonexistent_position(position_manager):
+    """Test handling order updates for symbols with no tracked position."""
+    # Ensure no position exists
+    assert position_manager.has_open_position("XYZUSDT") is False
+    
+    # Simulate an order update for a symbol with no position
+    order = Order(
+        order_id="xyz123", symbol="XYZUSDT", type=OrderType.MARKET, side=OrderSide.BUY,
+        quantity=0.01, status=OrderStatus.FILLED, timestamp=1234567890
+    )
+    # This should not raise an error
+    await position_manager.update_position_on_order_update(order)
+    
+    # Verify no position was created
+    assert position_manager.has_open_position("XYZUSDT") is False
 
 @pytest.mark.asyncio
 async def test_pm_reconcile_positions_with_exchange(position_manager):
@@ -272,6 +326,61 @@ async def test_pm_reconcile_positions_with_exchange(position_manager):
     
     # Verify position not on exchange was removed
     assert position_manager.has_open_position("SOLUSDT") is False
+
+@pytest.mark.asyncio
+async def test_pm_reconcile_positions_with_zero_quantity(position_manager):
+    """Test reconciling with an exchange position that has zero quantity."""
+    # Mock REST client with a zero-quantity position
+    mock_rest_client = AsyncMock()
+    mock_rest_client.fetch_positions.return_value = [
+        {
+            "symbol": "BTCUSDT",
+            "contracts": 0,  # Zero quantity position
+            "entryPrice": 50000.0,
+            "marginType": "ISOLATED",
+            "leverage": 20
+        }
+    ]
+    
+    # Add a position for BTCUSDT in manager
+    pos_data = Position(
+        symbol="BTCUSDT", contract_type="USDT_M", side=TradeDirection.LONG,
+        entry_price=50000.0, quantity=0.01, entry_order_id="entry1"
+    )
+    await position_manager.add_or_update_position(pos_data)
+    assert position_manager.has_open_position("BTCUSDT") is True
+    
+    # Reconcile
+    await position_manager.reconcile_positions_with_exchange(mock_rest_client)
+    
+    # Verify position was removed (because exchange shows zero quantity)
+    assert position_manager.has_open_position("BTCUSDT") is False
+
+@pytest.mark.asyncio
+async def test_pm_reconcile_positions_with_exchange_error(position_manager):
+    """Test reconciliation when fetch_positions returns None or raises an exception."""
+    # Add a position that should remain untouched if fetch_positions fails
+    pos_data = Position(
+        symbol="BTCUSDT", contract_type="USDT_M", side=TradeDirection.LONG,
+        entry_price=50000.0, quantity=0.01, entry_order_id="entry1"
+    )
+    await position_manager.add_or_update_position(pos_data)
+    
+    # Case 1: fetch_positions returns None
+    mock_rest_client1 = AsyncMock()
+    mock_rest_client1.fetch_positions.return_value = None
+    
+    # Reconcile - should not modify positions
+    await position_manager.reconcile_positions_with_exchange(mock_rest_client1)
+    assert position_manager.has_open_position("BTCUSDT") is True
+    
+    # Case 2: fetch_positions raises an exception
+    mock_rest_client2 = AsyncMock()
+    mock_rest_client2.fetch_positions.side_effect = Exception("API Error")
+    
+    # Reconcile - should not modify positions
+    await position_manager.reconcile_positions_with_exchange(mock_rest_client2)
+    assert position_manager.has_open_position("BTCUSDT") is True
 
 @pytest.mark.asyncio
 async def test_pm_thread_safety(position_manager):

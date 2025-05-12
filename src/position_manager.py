@@ -206,7 +206,7 @@ class PositionManager:
 
 # Example Usage (for testing purposes)
 async def main_position_manager_test():
-    logging.basicConfig(level=logging.INFO, format=\'%(asctime)s - %(name)s - %(levelname)s - %(message)s\')
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
     class MockConfigManager:
         def get_config(self): return {}
@@ -221,7 +221,7 @@ async def main_position_manager_test():
         quantity=0.001, entry_order_id="entry1", sl_order_id="sl1", tp_order_id="tp1"
     )
     await position_manager.add_or_update_position(pos1_data)
-    print(f"Position for BTCUSDT: {position_manager.get_position(\'BTCUSDT\')}")
+    print(f"Position for BTCUSDT: {position_manager.get_position('BTCUSDT')}")
     print(f"All positions: {position_manager.get_all_positions()}")
 
     # Test updating a position (e.g. SL moved, not fully implemented here but shows add_or_update)
@@ -230,7 +230,7 @@ async def main_position_manager_test():
         quantity=0.001, entry_order_id="entry1", sl_order_id="sl1_moved", tp_order_id="tp1"
     )
     await position_manager.add_or_update_position(pos1_updated_data)
-    print(f"Updated Position for BTCUSDT: {position_manager.get_position(\'BTCUSDT\')}")
+    print(f"Updated Position for BTCUSDT: {position_manager.get_position('BTCUSDT')}")
 
     # Test order update - SL filled
     sl_fill_order = Order(
@@ -238,8 +238,8 @@ async def main_position_manager_test():
         quantity=0.001, status=OrderStatus.FILLED, timestamp=1234567890, avg_fill_price=49000, filled_quantity=0.001
     )
     await position_manager.update_position_on_order_update(sl_fill_order)
-    print(f"Position for BTCUSDT after SL fill: {position_manager.get_position(\'BTCUSDT\')}") # Should be None
-    assert position_manager.get_position(\'BTCUSDT\') is None
+    print(f"Position for BTCUSDT after SL fill: {position_manager.get_position('BTCUSDT')}") # Should be None
+    assert position_manager.get_position('BTCUSDT') is None
 
     # Test adding another position
     pos2_data = Position(
@@ -252,7 +252,7 @@ async def main_position_manager_test():
     # Test removing a position directly
     await position_manager.remove_position("ETHUSDT")
     print(f"All positions after ETHUSDT removal: {position_manager.get_all_positions()}")
-    assert position_manager.get_position(\'ETHUSDT\') is None
+    assert position_manager.get_position('ETHUSDT') is None
 
 if __name__ == "__main__":
     import asyncio

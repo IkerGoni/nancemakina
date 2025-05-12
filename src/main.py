@@ -2,14 +2,16 @@ import asyncio
 import logging
 import signal
 import os
+from typing import Optional
 
+# Let's use absolute imports to be consistent and avoid potential issues
 from src.config_loader import ConfigManager
 from src.connectors import BinanceRESTClient, BinanceWebSocketConnector, convert_symbol_to_api_format
 from src.data_processor import DataProcessor
 from src.signal_engine import SignalEngineV1
 from src.order_manager import OrderManager
 from src.position_manager import PositionManager
-from src.models import Kline, Order # For type hinting if needed
+from src.models import Kline, Order, TradeSignal  # For type hinting
 # from src.monitoring import PrometheusMonitor # If implementing Prometheus
 
 # Setup basic logging
@@ -24,211 +26,209 @@ logging.basicConfig(
 logger = logging.getLogger("main_app")
 
 class TradingBot:
-    def __init__(self):
+    def __init__(self) -> None:
         self.config_manager = ConfigManager()
         self._configure_logging()
         
         self.rest_client = BinanceRESTClient(config_manager=self.config_manager)
         self.position_manager = PositionManager(config_manager=self.config_manager)
         self.order_manager = OrderManager(config_manager=self.config_manager, rest_client=self.rest_client)
-        # Pass position_manager to order_manager if it needs to directly update it, or handle updates in main loop
-        # self.order_manager.position_manager = self.position_manager # Example of direct linking
+        # Note: PositionManager updates rely on user data stream (to be implemented) or periodic reconciliation
+        # Direct linking could be done if needed: self.order_manager.position_manager = self.position_manager
 
         self.data_processor = DataProcessor(config_manager=self.config_manager)
         self.ws_connector = BinanceWebSocketConnector(
             config_manager=self.config_manager, 
-            kline_callback=self._handle_kline_data # Pass the method reference
+            kline_callback=self._handle_kline_data
         )
         self.signal_engine_v1 = SignalEngineV1(config_manager=self.config_manager, data_processor=self.data_processor)
         
         self.running = False
-        self.main_loop_task = None
-        self.active_trading_pairs = [] # List of config_symbols (e.g. BTC_USDT)
+        self.active_trading_pairs = []  # List of config_symbols (e.g. BTC_USDT)
 
         self.config_manager.register_callback(self._handle_app_config_update)
 
-    def _configure_logging(self):
+    def _configure_logging(self) -> None:
+        """Configure logging based on settings from config."""
         log_level_str = self.config_manager.get_specific_config("logging.level", "INFO").upper()
         log_level = getattr(logging, log_level_str, logging.INFO)
-        logging.getLogger().setLevel(log_level) # Set root logger level
+        logging.getLogger().setLevel(log_level)  # Set root logger level
         for handler in logging.getLogger().handlers:
             handler.setLevel(log_level)
         logger.info(f"Logging level set to {log_level_str}")
         # TODO: Add file logging based on config if specified
 
-    async def _handle_kline_data(self, kline: Kline, market_type: str):
-        # This callback is called by BinanceWebSocketConnector
-        # logger.debug(f"Main: Received kline for {kline.symbol} {kline.interval} from {market_type}")
-        await self.data_processor.process_kline(kline, market_type)
-        # Signal checking can be done here if kline is closed, or in a separate loop
-        # For V1, signal engine uses 1m timeframe. Check if this kline is relevant.
-        if kline.interval == "1m" and kline.is_closed: # Only check signals on closed 1m candles
-            # Find the config_symbol corresponding to kline.symbol (API format)
-            config = self.config_manager.get_config()
-            target_config_symbol = None
-            for cfg_sym, details in config.get("pairs", {}).items():
-                if convert_symbol_to_api_format(cfg_sym) == kline.symbol and details.get("enabled"):
-                    target_config_symbol = cfg_sym
-                    break
-            
-            if target_config_symbol:
-                # Check if a position is already open for this symbol to avoid concurrent trades on same signal type
+    async def _handle_kline_data(self, kline: Kline, market_type: str) -> None:
+        """
+        Process incoming kline data from WebSocket and trigger signal checks when appropriate.
+        Includes error handling to prevent WebSocket callback crashes.
+        """
+        try:
+            # Process the kline data through DataProcessor
+            await self.data_processor.process_kline(kline, market_type)
+        except Exception as e:
+            logger.error(f"Error processing kline for {kline.symbol}: {e}", exc_info=True)
+            return  # Skip signal check if data processing fails
+
+        # For V1, only check signals on closed 1m candles
+        if kline.interval == "1m" and kline.is_closed:
+            try:
+                # Find the config_symbol corresponding to kline.symbol (API format)
+                config = self.config_manager.get_config()
+                target_config_symbol = None
+                for cfg_sym, details in config.get("pairs", {}).items():
+                    if convert_symbol_to_api_format(cfg_sym) == kline.symbol and details.get("enabled"):
+                        target_config_symbol = cfg_sym
+                        break
+                
+                if not target_config_symbol:
+                    return  # No enabled config symbol found for this API symbol
+                
+                # Check if a position is already open for this symbol
                 if not self.position_manager.has_open_position(kline.symbol):
                     signal = await self.signal_engine_v1.check_signal(kline.symbol, target_config_symbol)
                     if signal:
                         logger.info(f"Signal generated for {signal.symbol}: {signal.direction.value}")
-                        # Before handling, ensure no conflicting position exists (double check)
+                        # Double check no position exists
                         if not self.position_manager.has_open_position(signal.symbol):
-                            await self.order_manager.handle_trade_signal(signal)
-                            # After order_manager handles, it should ideally create a position via position_manager
-                            # For now, let's assume OrderManager calls PositionManager or we do it here based on order success
-                            # This part needs robust handling of order confirmation and position creation.
-                            # For MVP, we assume OrderManager places orders and we rely on reconciliation or user data stream for position updates.
-                            # A simple way: after handle_trade_signal, if successful, create a placeholder position.
-                            # This is simplified. Real system needs order fill confirmation before creating position.
-                            # Let's assume OrderManager will eventually call PositionManager.add_or_update_position
+                            try:
+                                await self.order_manager.handle_trade_signal(signal)
+                                logger.info(f"Signal processed by OrderManager. Position tracking update will be handled via reconciliation or user data stream.")
+                                # Note: In the current architecture, position updates rely on:
+                                # 1. User data stream (to be implemented in future)
+                                # 2. Periodic reconciliation
+                            except Exception as e:
+                                logger.error(f"Error handling trade signal for {signal.symbol}: {e}", exc_info=True)
                         else:
                             logger.info(f"Signal for {signal.symbol} ignored, position already open.")
                 else:
                     logger.debug(f"Skipping signal check for {kline.symbol}, position already open.")
-            # else: logger.debug(f"No enabled config symbol found for API symbol {kline.symbol}")
+            except Exception as e:
+                logger.error(f"Error during signal processing for {kline.symbol}: {e}", exc_info=True)
 
-    async def _handle_order_update_data(self, order_data: Order):
-        # This callback would be called by a user data stream connector (not implemented in MVP)
+    async def _handle_order_update_data(self, order_data: Order) -> None:
+        """Handle order updates from user data stream (to be implemented)."""
         logger.info(f"Main: Received order update: {order_data.symbol} ID {order_data.order_id} Status {order_data.status}")
-        await self.position_manager.update_position_on_order_update(order_data)
+        try:
+            await self.position_manager.update_position_on_order_update(order_data)
+        except Exception as e:
+            logger.error(f"Error updating position based on order update: {e}", exc_info=True)
 
-    def _handle_app_config_update(self, new_config: dict):
+    def _handle_app_config_update(self, new_config: dict) -> None:
+        """Handle configuration updates affecting the main application."""
         logger.info("MainApp: Detected configuration change. Applying updates...")
-        self._configure_logging() # Update log level if changed
-        # Other modules (DataProcessor, WSConnector) handle their own config updates via callbacks.
-        # Update active trading pairs for the main loop if it depends on it.
+        self._configure_logging()  # Update log level if changed
+        
+        # Update active trading pairs
         self.active_trading_pairs = [
             cfg_sym for cfg_sym, details in new_config.get("pairs", {}).items() if details.get("enabled")
         ]
         logger.info(f"Updated active trading pairs: {self.active_trading_pairs}")
 
-    async def start(self):
+    async def start(self) -> None:
+        """Start the trading bot and all its components."""
         if self.running:
             logger.warning("Bot is already running.")
             return
-        self.running = True
+        
         logger.info("Starting Binance Futures Trading Bot...")
+        self.running = True
 
         # Initial config load for active pairs
         self._handle_app_config_update(self.config_manager.get_config())
 
         # Reconcile positions with exchange on startup
-        # await self.position_manager.reconcile_positions_with_exchange(self.rest_client)
-        # Note: reconcile_positions_with_exchange in PositionManager needs the rest_client.
-        # Consider passing it during PositionManager init or having a dedicated method in main.
-        logger.info("Position reconciliation on startup (manual call if needed)...")
-        # await self.position_manager.reconcile_positions_with_exchange(self.rest_client)
+        logger.info("Reconciling positions with exchange on startup...")
+        try:
+            await self.position_manager.reconcile_positions_with_exchange(self.rest_client)
+            logger.info("Position reconciliation completed.")
+        except Exception as e:
+            logger.error(f"Error during position reconciliation: {e}", exc_info=True)
 
         # Start WebSocket connector
-        await self.ws_connector.start()
-
-        # TODO: Start Prometheus monitor if implemented
-        # if hasattr(self, "prometheus_monitor") and self.prometheus_monitor:
-        #     self.prometheus_monitor.start()
+        try:
+            await self.ws_connector.start()
+            logger.info("WebSocket connector started successfully.")
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket connector: {e}", exc_info=True)
+            self.running = False
+            return
 
         logger.info("Bot is now running. Press Ctrl+C to stop.")
-        # Main loop could be here if we need periodic tasks not driven by websockets
-        # For now, most logic is event-driven by kline_callback
-        # self.main_loop_task = asyncio.create_task(self._periodic_tasks())
+        
+        # Main event loop - keep the application alive
         try:
-            while self.running: # Keep main alive, tasks run in background
-                await asyncio.sleep(1) 
+            while self.running:
+                await asyncio.sleep(1)
         except asyncio.CancelledError:
             logger.info("Main bot loop cancelled.")
 
-    async def _periodic_tasks(self):
-        """For tasks that need to run periodically, e.g., checking all pairs for signals if not event-driven."""
-        while self.running:
-            # Example: Periodically check all active pairs for signals if not purely event-driven
-            # for config_symbol in self.active_trading_pairs:
-            #     api_symbol = convert_symbol_to_api_format(config_symbol)
-            #     if not self.position_manager.has_open_position(api_symbol):
-            #         signal = await self.signal_engine_v1.check_signal(api_symbol, config_symbol)
-            #         if signal:
-            #             await self.order_manager.handle_trade_signal(signal)
-            #     await asyncio.sleep(0.1) # Small delay between checks
-            await asyncio.sleep(60) # Run periodic checks every 60 seconds
-
-    async def stop(self):
+    async def stop(self) -> None:
+        """Stop the trading bot and all its components gracefully."""
         if not self.running:
+            logger.info("Bot is not running.")
             return
-        self.running = False
+        
         logger.info("Stopping Binance Futures Trading Bot...")
-
-        if self.main_loop_task and not self.main_loop_task.done():
-            self.main_loop_task.cancel()
-            try:
-                await self.main_loop_task
-            except asyncio.CancelledError:
-                logger.info("Main loop task successfully cancelled.")
+        self.running = False
 
         # Stop WebSocket connector
         if self.ws_connector:
-            await self.ws_connector.stop()
+            try:
+                await self.ws_connector.stop()
+                logger.info("WebSocket connector stopped successfully.")
+            except Exception as e:
+                logger.error(f"Error stopping WebSocket connector: {e}", exc_info=True)
         
         # Close REST client connection
         if self.rest_client:
-            await self.rest_client.close_exchange()
+            try:
+                await self.rest_client.close_exchange()
+                logger.info("REST client closed successfully.")
+            except Exception as e:
+                logger.error(f"Error closing REST client: {e}", exc_info=True)
 
         # Stop config watcher
         if self.config_manager:
-            self.config_manager.stop_watcher()
+            try:
+                self.config_manager.stop_watcher()
+                logger.info("Config manager watcher stopped successfully.")
+            except Exception as e:
+                logger.error(f"Error stopping config watcher: {e}", exc_info=True)
         
-        # TODO: Stop Prometheus monitor
-        # if hasattr(self, "prometheus_monitor") and self.prometheus_monitor:
-        #     self.prometheus_monitor.stop()
-
         logger.info("Bot has stopped.")
 
-def handle_sigterm(sig, frame):
+
+def handle_sigterm(sig, frame) -> None:
+    """
+    Handle SIGTERM signal for graceful shutdown.
+    Only sets the running flag to False, letting the main loop handle the actual shutdown.
+    """
     logger.info("SIGTERM received, initiating graceful shutdown...")
-    # This function is synchronous, so we need to schedule the async stop
-    # Get the running loop or create a new one to run the stop coroutine
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    
-    # Assuming `bot` is accessible globally or passed appropriately
+    # Simply set the running flag to False
     if "bot_instance" in globals() and bot_instance:
-        # loop.create_task(bot_instance.stop()) # This might not wait for completion
-        # To ensure it runs and completes before exit:
-        loop.run_until_complete(bot_instance.stop())
+        bot_instance.running = False
     else:
         logger.warning("Bot instance not found for SIGTERM handler.")
-    # The application will exit after this handler returns
-    # For a cleaner exit, especially if run_until_complete is used, 
-    # it might be better to raise an exception that the main try/except block can catch.
-    # Or, ensure the main loop itself checks `self.running` and exits.
-    # For now, this will trigger stop and then Python will exit.
-    # A more robust way is to set a flag and let the main loop handle exit.
-    if "bot_instance" in globals() and bot_instance: # Set flag for main loop
-        bot_instance.running = False 
 
-async def main():
-    global bot_instance # Make bot instance accessible to signal handler
-    bot_instance = TradingBot()
-
-    # Register signal handlers for graceful shutdown
-    # For asyncio, it's often better to handle KeyboardInterrupt in the main try/except
-    # signal.signal(signal.SIGINT, handle_sigterm) # Ctrl+C
-    signal.signal(signal.SIGTERM, handle_sigterm) # Termination signal
-
+async def main() -> None:
+    """Main entry point for the application."""
+    global bot_instance  # Make bot instance accessible to signal handler
+    bot_instance = None
+    
     try:
+        bot_instance = TradingBot()
+        
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, handle_sigterm)
+        
         await bot_instance.start()
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, stopping bot...")
     except Exception as e:
         logger.error(f"Unhandled exception in main: {e}", exc_info=True)
     finally:
-        if bot_instance.running: # Ensure stop is called if not already
+        if bot_instance and bot_instance.running:
             await bot_instance.stop()
 
 if __name__ == "__main__":
