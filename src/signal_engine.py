@@ -17,23 +17,30 @@ class SignalEngineV1:
         self.last_signal_time: Dict[str, float] = {} # Stores timestamp of the last signal for each pair
 
     def _get_pair_specific_config(self, config_symbol: str) -> Dict[str, Any]:
+        """Retrieves configuration for a specific trading pair, falling back to global defaults when needed."""
         config = self.config_manager.get_config()
-        pair_configs = config.get("pairs", {})
         global_v1_config = config.get("global_settings", {}).get("v1_strategy", {})
+        pair_config = config.get("pairs", {}).get(config_symbol, {})
         
-        pair_specific_overrides = {}
-        for cfg_sym, details in pair_configs.items():
-            if cfg_sym.upper() == config_symbol.upper(): # Match config_symbol (e.g. BTC_USDT)
-                pair_specific_overrides = details
-                break
-        
-        return {
-            "sma_short_period": pair_specific_overrides.get("sma_short_period", global_v1_config.get("sma_short_period", 21)),
-            "sma_long_period": pair_specific_overrides.get("sma_long_period", global_v1_config.get("sma_long_period", 200)),
-            "min_signal_interval_minutes": pair_specific_overrides.get("min_signal_interval_minutes", global_v1_config.get("min_signal_interval_minutes", 15)),
-            "tp_sl_ratio": pair_specific_overrides.get("tp_sl_ratio", global_v1_config.get("tp_sl_ratio", 3.0)),
-            "contract_type": pair_specific_overrides.get("contract_type", "USDT_M") # Default to USDT_M
+        # Merge global defaults with pair-specific settings
+        merged_config = {
+            "sma_short_period": pair_config.get("sma_short_period", global_v1_config.get("sma_short_period", 21)),
+            "sma_long_period": pair_config.get("sma_long_period", global_v1_config.get("sma_long_period", 200)),
+            "min_signal_interval_minutes": pair_config.get("min_signal_interval_minutes", global_v1_config.get("min_signal_interval_minutes", 15)),
+            "tp_sl_ratio": pair_config.get("tp_sl_ratio", global_v1_config.get("tp_sl_ratio", 3.0)),
+            "leverage": pair_config.get("leverage", global_v1_config.get("default_leverage", 10)),
+            "margin_mode": pair_config.get("margin_mode", global_v1_config.get("margin_mode", "ISOLATED")),
+            "contract_type": pair_config.get("contract_type", "USD_M"),  # Default to USD-M
+            "fallback_sl_percentage": pair_config.get("fallback_sl_percentage", global_v1_config.get("fallback_sl_percentage", 0.02))  # Add fallback SL percentage
         }
+        
+        # Handle margin amount based on contract type
+        if merged_config["contract_type"] == "USD_M":
+            merged_config["margin_usdt"] = pair_config.get("margin_usdt", global_v1_config.get("default_margin_usdt", 50.0))
+        else:  # COIN_M
+            merged_config["margin_coin"] = pair_config.get("margin_coin", global_v1_config.get("default_margin_coin", 0.01))
+            
+        return merged_config
 
     def _find_recent_pivot(self, klines_df: pd.DataFrame, lookback: int = 10, direction: TradeDirection = TradeDirection.LONG) -> Optional[float]:
         """Finds the most recent significant pivot low (for LONG) or high (for SHORT)."""
@@ -139,13 +146,55 @@ class SignalEngineV1:
             logger.debug(f"No crossover detected for {api_symbol}")
             return None # No crossover
 
-        # --- SL/TP Calculation ---
+        # TEMPORARY DEBUG CODE: Bypass SL/TP calculation for testing crossovers
+        if signal_direction:
+            logger.info(f"TEMP DEBUG: Crossover ({signal_direction.value}) detected for {api_symbol} at entry {latest['close']}.")
+            logger.info(f"TEMP DEBUG: Prev SMAs: S={previous[sma_short_col]}, L={previous[sma_long_col]}. Curr SMAs: S={latest[sma_short_col]}, L={latest[sma_long_col]}")
+            
+            # Construct a minimal Kline for the signal
+            temp_kline = Kline(
+                timestamp=int(latest.name),
+                open=latest["open"],
+                high=latest["high"],
+                low=latest["low"],
+                close=latest["close"],
+                volume=latest["volume"],
+                is_closed=latest["is_closed"],
+                symbol=api_symbol,
+                interval=signal_interval
+            )
+            
+            # Use dummy SL/TP values based on direction
+            dummy_sl = latest["close"] * (0.99 if signal_direction == TradeDirection.LONG else 1.01)  # 1% away
+            dummy_tp = latest["close"] * (1.01 if signal_direction == TradeDirection.LONG else 0.99)  # 1% away
+            
+            return TradeSignal(
+                symbol=api_symbol,
+                config_symbol=config_symbol,
+                contract_type=pair_config["contract_type"],
+                direction=signal_direction,
+                entry_price=latest["close"],
+                stop_loss_price=dummy_sl,
+                take_profit_price=dummy_tp,
+                strategy_name="V1_SMA_Crossover",
+                signal_kline=temp_kline,
+                details={
+                    "temp_debug": True,
+                    "sma_short_at_signal": latest[sma_short_col],
+                    "sma_long_at_signal": latest[sma_long_col],
+                    "sma_short_previous": previous[sma_short_col],
+                    "sma_long_previous": previous[sma_long_col]
+                }
+            )
+        
+        # Original SL/TP calculation
         entry_price = latest["close"] # Current close price as entry
         logger.debug(f"Entry price for {api_symbol}: {entry_price}")
         
         stop_loss_price: Optional[float] = None
         take_profit_price: Optional[float] = None
         tp_sl_ratio = pair_config["tp_sl_ratio"]
+        fallback_sl_percentage = pair_config["fallback_sl_percentage"]  # Get fallback SL percentage
 
         # Standard pivot lookback for production use
         pivot_lookback = 30
@@ -163,13 +212,20 @@ class SignalEngineV1:
                 logger.debug(f"Calculated risk for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}")
                 
                 if risk <= 0: # Invalid SL (e.g. pivot_low >= entry_price)
-                    logger.warning(f"Invalid SL for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}. Skipping signal.")
-                    return None
+                    logger.warning(f"Invalid SL for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}. Using fallback SL.")
+                    # Use fallback SL instead of skipping the signal
+                    stop_loss_price = entry_price * (1 - fallback_sl_percentage)
+                    risk = entry_price - stop_loss_price
+                    logger.warning(f"Using fallback %-based SL for LONG {api_symbol}. New SL: {stop_loss_price}, risk: {risk}")
                 take_profit_price = entry_price + (risk * tp_sl_ratio)
                 logger.debug(f"Calculated TP for LONG {api_symbol}: TP={take_profit_price} (risk={risk} * ratio={tp_sl_ratio})")
             else:
-                logger.warning(f"Could not determine pivot low for LONG SL for {api_symbol}. Skipping signal.")
-                return None
+                logger.warning(f"Could not determine pivot low for LONG SL for {api_symbol}. Using fallback SL.")
+                # Implement fallback SL calculation
+                stop_loss_price = entry_price * (1 - fallback_sl_percentage)
+                risk = entry_price - stop_loss_price
+                take_profit_price = entry_price + (risk * tp_sl_ratio)
+                logger.warning(f"Using fallback %-based SL for LONG {api_symbol}. SL: {stop_loss_price}, TP: {take_profit_price}")
         else: # TradeDirection.SHORT
             pivot_high = self._find_recent_pivot(df, lookback=pivot_lookback, direction=TradeDirection.SHORT)
             logger.debug(f"SHORT signal - find_recent_pivot result for {api_symbol}: pivot_high={pivot_high}")
@@ -180,22 +236,36 @@ class SignalEngineV1:
                 logger.debug(f"Calculated risk for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}")
                 
                 if risk <= 0: # Invalid SL (e.g. pivot_high <= entry_price)
-                    logger.warning(f"Invalid SL for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}. Skipping signal.")
-                    return None
+                    logger.warning(f"Invalid SL for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}. Using fallback SL.")
+                    # Use fallback SL instead of skipping the signal
+                    stop_loss_price = entry_price * (1 + fallback_sl_percentage)
+                    risk = stop_loss_price - entry_price
+                    logger.warning(f"Using fallback %-based SL for SHORT {api_symbol}. New SL: {stop_loss_price}, risk: {risk}")
                 take_profit_price = entry_price - (risk * tp_sl_ratio)
                 logger.debug(f"Calculated TP for SHORT {api_symbol}: TP={take_profit_price} (risk={risk} * ratio={tp_sl_ratio})")
             else:
-                logger.warning(f"Could not determine pivot high for SHORT SL for {api_symbol}. Skipping signal.")
-                return None
+                logger.warning(f"Could not determine pivot high for SHORT SL for {api_symbol}. Using fallback SL.")
+                # Implement fallback SL calculation
+                stop_loss_price = entry_price * (1 + fallback_sl_percentage)
+                risk = stop_loss_price - entry_price
+                take_profit_price = entry_price - (risk * tp_sl_ratio)
+                logger.warning(f"Using fallback %-based SL for SHORT {api_symbol}. SL: {stop_loss_price}, TP: {take_profit_price}")
 
         if stop_loss_price is None or take_profit_price is None:
             logger.warning(f"Failed to calculate SL/TP for {api_symbol}. Skipping signal.")
             return None
         
-        # Ensure SL and TP are not the same as entry or inverted
+        # Final validation of calculated SL/TP values
         if (signal_direction == TradeDirection.LONG and (stop_loss_price >= entry_price or take_profit_price <= entry_price)) or \
            (signal_direction == TradeDirection.SHORT and (stop_loss_price <= entry_price or take_profit_price >= entry_price)):
-            logger.warning(f"Calculated SL/TP invalid for {api_symbol}: E={entry_price}, SL={stop_loss_price}, TP={take_profit_price}. Skipping signal.")
+            logger.warning(f"Calculated SL/TP invalid for {api_symbol}: Direction={signal_direction.value}, Entry={entry_price}, SL={stop_loss_price}, TP={take_profit_price}. Skipping signal.")
+            return None
+
+        # Ensure we haven't issued a signal for this symbol recently
+        current_time = int(time.time())
+        min_interval_seconds = pair_config["min_signal_interval_minutes"] * 60
+        if api_symbol in self.last_signal_time and (current_time - self.last_signal_time[api_symbol]) < min_interval_seconds:
+            logger.debug(f"Signal for {api_symbol} too soon. Last signal: {self.last_signal_time[api_symbol]}, current: {current_time}")
             return None
 
         self.last_signal_time[api_symbol] = current_time

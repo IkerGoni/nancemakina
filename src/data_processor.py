@@ -109,12 +109,29 @@ class DataProcessor:
         sma_short_period = config.get("global_settings", {}).get("v1_strategy", {}).get("sma_short_period", 21)
         sma_long_period = config.get("global_settings", {}).get("v1_strategy", {}).get("sma_long_period", 200)
 
-        if len(df) >= sma_short_period:
+        # Add debug logs for SMA periods
+        logger.debug(f"SMA periods from config - short: {sma_short_period}, long: {sma_long_period}")
+        
+        # Special handling for SMA period 1
+        if sma_short_period == 1:
+            logger.debug("Using direct close prices for SMA_short period 1")
+            df["sma_short"] = df["close"]
+        elif len(df) >= sma_short_period:
             df["sma_short"] = df["close"].rolling(window=sma_short_period).mean()
         else:
             df["sma_short"] = pd.NA
 
-        if len(df) >= sma_long_period:
+        # Special handling for SMA period 2
+        if sma_long_period == 2 and len(df) >= 2:
+            logger.debug("Manual calculation for SMA_long period 2")
+            # Manual calculation for SMA(2) to ensure it's correct
+            # For the last row, it's (current close + previous close) / 2
+            last_two_closes = df["close"].tail(2).values
+            if len(last_two_closes) == 2:
+                last_sma2 = (last_two_closes[0] + last_two_closes[1]) / 2
+                logger.debug(f"Last two closes: {last_two_closes[0]}, {last_two_closes[1]}, SMA(2): {last_sma2}")
+            df["sma_long"] = df["close"].rolling(window=2).mean()
+        elif len(df) >= sma_long_period:
             df["sma_long"] = df["close"].rolling(window=sma_long_period).mean()
         else:
             df["sma_long"] = pd.NA

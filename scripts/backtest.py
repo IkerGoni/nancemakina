@@ -187,6 +187,13 @@ class Backtester:
                     kline_slice = valid_sma_rows[:i+1]  # Include data up to current point only
                     self.data_processor.indicator_data[symbol]["1m"] = kline_slice
                     
+                    # Debug log to see the exact DataFrame state before check_signal
+                    logger.debug(f"DataFrame state right before check_signal:")
+                    df_state = self.data_processor.get_indicator_dataframe(symbol, "1m")
+                    logger.debug(f"DataFrame shape: {df_state.shape}, last 2 rows:")
+                    logger.debug(f"Previous row:\n{df_state.iloc[-2][['close', 'sma_short', 'sma_long']]}")
+                    logger.debug(f"Latest row:\n{df_state.iloc[-1][['close', 'sma_short', 'sma_long']]}")
+                    
                     # Check for signal at this point using the signal engine
                     signal = await self.signal_engine.check_signal(symbol, config_symbol)
                     

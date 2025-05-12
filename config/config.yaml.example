@@ -23,6 +23,8 @@ global_settings:
     default_leverage: 10
     # Default margin mode: "ISOLATED" or "CROSSED"
     margin_mode: "ISOLATED"
+    # Fallback SL percentage when pivot-based SL calculation fails or gives invalid results
+    fallback_sl_percentage: 0.02 # Default 2% from entry
     # Timeframes to calculate SMAs on (e.g., 1m, 5m, 15m, 1h, 4h). V1 uses 1m for signals.
     # The data_processor will calculate for all these, signal_engine_v1 will use 1m.
     indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"]
