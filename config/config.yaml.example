@@ -102,10 +102,10 @@ monitoring:
   prometheus_port: 8000 # Port for Prometheus metrics endpoint
 
 backtesting: # Configuration for backtesting module (future phase)
+  initial_balance_usdt: 10000
+  fee_percent: 0.04    # 0.04% trading fee (taker)
+  slippage_percent: 0.01 # 0.01% slippage
   # start_date: "2023-01-01T00:00:00Z"
   # end_date: "2023-12-31T23:59:59Z"
-  # initial_balance_usdt: 10000
   # initial_balance_coin: { "BTC": 1, "ETH": 10 } # For COIN-M backtesting
-  # slippage_percent: 0.01 # 0.01% slippage
-  # fee_percent: 0.04    # 0.04% trading fee (taker)
 

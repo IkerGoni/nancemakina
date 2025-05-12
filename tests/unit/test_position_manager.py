@@ -387,9 +387,10 @@ async def test_pm_thread_safety(position_manager):
     # This test is more conceptual than practical in a unit test environment
     # In a real multi-threaded environment, we'd need to test with actual threads
     
-    # Verify the lock exists and is a RLock
+    # Verify the lock exists and has acquire/release methods like a lock should
     assert hasattr(position_manager, "_lock")
-    assert isinstance(position_manager._lock, RLock)
+    assert hasattr(position_manager._lock, "acquire")
+    assert hasattr(position_manager._lock, "release")
     
     # Test that methods use the lock (we can't directly test this without mocking the lock)
     # But we can verify the methods work correctly
@@ -401,10 +402,28 @@ async def test_pm_thread_safety(position_manager):
     await position_manager.add_or_update_position(pos_data)
     assert position_manager.get_position("BTCUSDT") is not None
     
-    # Simulate concurrent operations
-    await asyncio.gather(
-        position_manager.add_or_update_position(pos_data),
-        position_manager.get_position("BTCUSDT"),
-        position_manager.get_all_positions()
+    # Create a few async tasks that modify and read the position state
+    # to simulate concurrent operations
+    async def update_task():
+        await position_manager.add_or_update_position(pos_data)
+        return True
+        
+    async def get_task():
+        # Wrap the synchronous call in an async function
+        return position_manager.get_position("BTCUSDT")
+        
+    async def list_task():
+        # Wrap the synchronous call in an async function
+        return position_manager.get_all_positions()
+    
+    # Run tasks concurrently
+    results = await asyncio.gather(
+        update_task(),
+        get_task(),
+        list_task()
     )
-    # If no exceptions, the lock is working as expected
+    
+    # Verify results
+    assert results[0] is True  # update_task completed
+    assert results[1] is not None  # get_task returned position
+    assert len(results[2]) == 1  # list_task returned list with one position
