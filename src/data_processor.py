@@ -106,12 +106,23 @@ class DataProcessor:
             return
 
         config = self.config_manager.get_config()
-        sma_short_period = config.get("global_settings", {}).get("v1_strategy", {}).get("sma_short_period", 21)
-        sma_long_period = config.get("global_settings", {}).get("v1_strategy", {}).get("sma_long_period", 200)
+        global_settings = config.get("global_settings", {})
+        v1_strategy_config = global_settings.get("v1_strategy", {})
+        sma_short_period = v1_strategy_config.get("sma_short_period", 21)
+        sma_long_period = v1_strategy_config.get("sma_long_period", 200)
 
-        # Add debug logs for SMA periods
-        logger.debug(f"SMA periods from config - short: {sma_short_period}, long: {sma_long_period}")
+        # Get Volume & Volatility settings from global config
+        volume_config = v1_strategy_config.get("filters", {}).get("volume", {})
+        volatility_config = v1_strategy_config.get("filters", {}).get("volatility", {})
         
+        # Retrieve periods for Average Volume and ATR from config
+        avg_vol_period = volume_config.get("lookback_periods", 20)
+        atr_period = volatility_config.get("lookback_periods", 14)
+        
+        logger.debug(f"Indicator periods from config - SMA short: {sma_short_period}, SMA long: {sma_long_period}, "
+                   f"Avg Volume: {avg_vol_period}, ATR: {atr_period}")
+        
+        # Calculate SMAs
         # Special handling for SMA period 1
         if sma_short_period == 1:
             logger.debug("Using direct close prices for SMA_short period 1")
@@ -135,6 +146,36 @@ class DataProcessor:
             df["sma_long"] = df["close"].rolling(window=sma_long_period).mean()
         else:
             df["sma_long"] = pd.NA
+        
+        # Calculate Average Volume
+        if len(df) >= avg_vol_period:
+            df["avg_volume"] = df["volume"].rolling(window=avg_vol_period).mean()
+            logger.debug(f"Calculated Average Volume for {api_symbol}/{interval} over {avg_vol_period} periods")
+        else:
+            df["avg_volume"] = pd.NA
+            logger.debug(f"Not enough data for Average Volume calculation, need {avg_vol_period} candles, got {len(df)}")
+        
+        # Calculate ATR (Average True Range)
+        # TR = max(High - Low, abs(High - Previous_Close), abs(Low - Previous_Close))
+        if len(df) >= 2:  # Need at least 2 candles for TR calculation due to Previous_Close
+            # Calculate components of True Range
+            high_low = df["high"] - df["low"]
+            high_close_prev = abs(df["high"] - df["close"].shift(1))
+            low_close_prev = abs(df["low"] - df["close"].shift(1))
+            
+            # True Range is the maximum of the three components
+            tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+            
+            # Calculate ATR as SMA of True Range
+            if len(df) >= atr_period + 1:  # +1 because first TR value will be NaN due to shift
+                df["atr"] = tr.rolling(window=atr_period).mean()
+                logger.debug(f"Calculated ATR for {api_symbol}/{interval} over {atr_period} periods")
+            else:
+                df["atr"] = pd.NA
+                logger.debug(f"Not enough data for ATR calculation, need {atr_period+1} candles, got {len(df)}")
+        else:
+            df["atr"] = pd.NA
+            logger.debug(f"Not enough data for TR calculation, need at least 2 candles, got {len(df)}")
         
         self.indicator_data[api_symbol][interval] = df
 

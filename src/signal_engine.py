@@ -383,6 +383,95 @@ class SignalEngineV1:
         logger.debug(f"Final calculated TP: {take_profit_price}")
         return take_profit_price
 
+    def _passes_volume_filter(self, latest_kline_data: pd.Series, volume_filter_config: Dict[str, Any]) -> bool:
+        """
+        Checks if the current volume meets the required threshold compared to average volume.
+        
+        Args:
+            latest_kline_data: Series containing the latest candle data including volume and avg_volume
+            volume_filter_config: Configuration for volume filter
+            
+        Returns:
+            True if filter passes, False if it fails
+        """
+        if not volume_filter_config.get("enabled", False):
+            logger.debug("Volume filter not enabled, passing")
+            return True
+            
+        current_volume = latest_kline_data.get("volume")
+        avg_volume = latest_kline_data.get("avg_volume")
+        
+        # Check if we have valid volume data
+        if pd.isna(avg_volume) or avg_volume == 0:
+            logger.warning(f"Average volume is not available or zero. avg_volume: {avg_volume}")
+            # Return True to not block signals when data isn't ready yet
+            return True
+            
+        threshold_ratio = volume_filter_config.get("min_threshold", 1.5)
+        volume_requirement = avg_volume * threshold_ratio
+        
+        # Check if current volume meets the minimum threshold
+        passes = current_volume >= volume_requirement
+        
+        logger.debug(f"Volume filter: current={current_volume}, average={avg_volume}, " 
+                    f"required={volume_requirement} (avg * {threshold_ratio}), passes={passes}")
+        
+        return passes
+
+    def _passes_volatility_filter(self, latest_kline_data: pd.Series, volatility_filter_config: Dict[str, Any]) -> bool:
+        """
+        Checks if the current volatility (ATR) meets the specified conditions.
+        
+        Args:
+            latest_kline_data: Series containing the latest candle data including close price and atr
+            volatility_filter_config: Configuration for volatility filter
+            
+        Returns:
+            True if filter passes, False if it fails
+        """
+        if not volatility_filter_config.get("enabled", False):
+            logger.debug("Volatility filter not enabled, passing")
+            return True
+            
+        atr = latest_kline_data.get("atr")
+        close_price = latest_kline_data.get("close")
+        
+        # Check if we have valid ATR and price data
+        if pd.isna(atr) or pd.isna(close_price) or close_price == 0:
+            logger.warning(f"ATR or close price is not available. ATR: {atr}, Close: {close_price}")
+            # Return True to not block signals when data isn't ready yet
+            return True
+            
+        # Calculate ATR as percentage of price
+        atr_percentage = (atr / close_price) * 100
+        
+        # Get filter configuration
+        condition_type = volatility_filter_config.get("indicator", "atr")
+        min_threshold = volatility_filter_config.get("min_threshold", 0.002)
+        max_threshold = volatility_filter_config.get("max_threshold", 0.05)
+        
+        # Convert thresholds to percentage if they're not already (for readability in logs)
+        min_threshold_pct = min_threshold * 100 if min_threshold < 1 else min_threshold
+        max_threshold_pct = max_threshold * 100 if max_threshold < 1 else max_threshold
+        
+        # Implement different condition types
+        passes = False
+        
+        if condition_type == "atr":
+            # Check if ATR percentage is within desired range
+            min_condition = atr_percentage >= min_threshold_pct
+            max_condition = atr_percentage <= max_threshold_pct
+            passes = min_condition and max_condition
+            
+            logger.debug(f"Volatility filter: ATR={atr}, Close={close_price}, ATR%={atr_percentage:.2f}%, " 
+                         f"min={min_threshold_pct:.2f}%, max={max_threshold_pct:.2f}%, "
+                         f"min_passed={min_condition}, max_passed={max_condition}, overall={passes}")
+        else:
+            logger.warning(f"Unknown volatility condition type: {condition_type}")
+            passes = True  # Default to pass for unknown types
+            
+        return passes
+
     async def check_signal(self, api_symbol: str, config_symbol: str) -> Optional[TradeSignal]:
         """Checks for a V1 SMA crossover signal for the given API symbol (e.g., BTCUSDT)."""
         # 1. Get pair config with the new nested configurations
@@ -452,23 +541,21 @@ class SignalEngineV1:
                 return None
             logger.debug(f"Buffer time filter passed for {api_symbol} {signal_direction.value}")
 
-        # 6. Volume Filter (stub)
+        # 6. Volume Filter
         volume_config = pair_config["filters"]["volume"]
         if volume_config["enabled"]:
-            logger.info(f"Volume filter enabled for {api_symbol} but not yet implemented. Passing.")
-            # TODO: Implement volume filter logic
-            # if not self._passes_volume_filter(df, volume_config):
-            #     logger.info(f"Volume filter failed for {api_symbol}")
-            #     return None
+            if not self._passes_volume_filter(latest, volume_config):
+                logger.info(f"Volume filter failed for {api_symbol}")
+                return None
+            logger.debug(f"Volume filter passed for {api_symbol} {signal_direction.value}")
 
-        # 7. Volatility Filter (stub)
+        # 7. Volatility Filter
         volatility_config = pair_config["filters"]["volatility"]
         if volatility_config["enabled"]:
-            logger.info(f"Volatility filter enabled for {api_symbol} but not yet implemented. Passing.")
-            # TODO: Implement volatility filter logic
-            # if not self._passes_volatility_filter(df, volatility_config):
-            #     logger.info(f"Volatility filter failed for {api_symbol}")
-            #     return None
+            if not self._passes_volatility_filter(latest, volatility_config):
+                logger.info(f"Volatility filter failed for {api_symbol}")
+                return None
+            logger.debug(f"Volatility filter passed for {api_symbol} {signal_direction.value}")
 
         # 8. Entry price
         entry_price = latest["close"]
@@ -554,7 +641,12 @@ class SignalEngineV1:
                 "tp_method": tp_method,
                 "buffer_time_filter_enabled": buffer_time_config["enabled"],
                 "volume_filter_enabled": volume_config["enabled"],
-                "volatility_filter_enabled": volatility_config["enabled"]
+                "volatility_filter_enabled": volatility_config["enabled"],
+                "volume_at_signal": latest.get("volume"),
+                "avg_volume_at_signal": latest.get("avg_volume"),
+                "atr_at_signal": latest.get("atr"),
+                "atr_percentage_of_price": None if pd.isna(latest.get("atr")) or latest.get("close") == 0 
+                                           else (latest.get("atr") / latest.get("close")) * 100
             }
         )
 

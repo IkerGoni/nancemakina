@@ -416,6 +416,224 @@ async def test_se_signal_interval_is_pair_specific(signal_engine_v1, mock_data_p
     assert btc_signal2 is None
     assert eth_signal2 is not None
 
+@pytest.mark.asyncio
+async def test_se_volume_filter_passes_with_sufficient_volume(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volume filter passes when volume exceeds threshold."""
+    # Create DataFrame with current volume > avg_volume * threshold
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    # Add volume data to test the filter
+    df["volume"] = 2000  # Current volume
+    df["avg_volume"] = 1000  # Average volume
+    
+    # Configure the filter to require 1.5x average volume
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volume filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volume": {"enabled": True, "min_threshold": 1.5}
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should be generated as volume filter passes (2000 > 1000 * 1.5)
+    assert signal is not None
+    assert signal.symbol == "ETHUSDT"
+    assert signal.direction == TradeDirection.LONG
+
+@pytest.mark.asyncio
+async def test_se_volume_filter_blocks_with_insufficient_volume(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volume filter blocks signals when volume is insufficient."""
+    # Create DataFrame with current volume < avg_volume * threshold
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    # Add volume data to test the filter
+    df["volume"] = 1200  # Current volume
+    df["avg_volume"] = 1000  # Average volume
+    
+    # Configure the filter to require 1.5x average volume
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volume filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volume": {"enabled": True, "min_threshold": 1.5}
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should be blocked as volume filter fails (1200 < 1000 * 1.5)
+    assert signal is None
+
+@pytest.mark.asyncio
+async def test_se_volume_filter_handles_missing_data(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volume filter gracefully handles missing avg_volume data."""
+    # Create DataFrame with missing avg_volume
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    # Add volume but set avg_volume to NA
+    df["volume"] = 1000
+    df["avg_volume"] = pd.NA
+    
+    # Configure the filter
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volume filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volume": {"enabled": True, "min_threshold": 1.5}
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should still be generated despite missing avg_volume (graceful handling)
+    assert signal is not None
+    assert signal.symbol == "ETHUSDT"
+    assert signal.direction == TradeDirection.LONG
+
+@pytest.mark.asyncio
+async def test_se_volatility_filter_passes_within_range(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volatility filter passes when ATR is within desired range."""
+    # Create DataFrame with ATR in acceptable range
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.0
+    )
+    # Add ATR data - 3% of price (within min 1% and max 5%)
+    df["atr"] = 3.0  # 3% of price (100)
+    
+    # Configure the filter
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volatility filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volatility": {
+            "enabled": True, 
+            "indicator": "atr",
+            "min_threshold": 1.0,  # 1%
+            "max_threshold": 5.0   # 5%
+        }
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should be generated as ATR is within range
+    assert signal is not None
+    assert signal.symbol == "ETHUSDT"
+
+@pytest.mark.asyncio
+async def test_se_volatility_filter_blocks_below_min(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volatility filter blocks when ATR is below minimum threshold."""
+    # Create DataFrame with ATR below min threshold
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.0
+    )
+    # Add ATR data - 0.5% of price (below min 1%)
+    df["atr"] = 0.5  # 0.5% of price (100)
+    
+    # Configure the filter
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volatility filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volatility": {
+            "enabled": True, 
+            "indicator": "atr",
+            "min_threshold": 1.0,  # 1%
+            "max_threshold": 5.0   # 5%
+        }
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should be blocked as ATR is below min threshold
+    assert signal is None
+
+@pytest.mark.asyncio
+async def test_se_volatility_filter_blocks_above_max(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volatility filter blocks when ATR is above maximum threshold."""
+    # Create DataFrame with ATR above max threshold
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.0
+    )
+    # Add ATR data - 6% of price (above max 5%)
+    df["atr"] = 6.0  # 6% of price (100)
+    
+    # Configure the filter
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volatility filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volatility": {
+            "enabled": True, 
+            "indicator": "atr",
+            "min_threshold": 1.0,  # 1%
+            "max_threshold": 5.0   # 5%
+        }
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should be blocked as ATR is above max threshold
+    assert signal is None
+
+@pytest.mark.asyncio
+async def test_se_volatility_filter_handles_missing_data(signal_engine_v1, mock_data_processor_for_se):
+    """Test that volatility filter gracefully handles missing ATR data."""
+    # Create DataFrame with missing ATR
+    df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.0
+    )
+    # Set ATR to NA
+    df["atr"] = pd.NA
+    
+    # Configure the filter
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = df
+    
+    # Enable volatility filter in config
+    mock_config = signal_engine_v1.config_manager.get_config.return_value
+    mock_config["pairs"]["ETH_USDT"]["filters"] = {
+        "volatility": {
+            "enabled": True, 
+            "indicator": "atr",
+            "min_threshold": 1.0,
+            "max_threshold": 5.0
+        }
+    }
+    
+    # Test signal generation
+    signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+    
+    # Signal should still be generated despite missing ATR (graceful handling)
+    assert signal is not None
+    assert signal.symbol == "ETHUSDT"
+
 # 4. Test Helper Methods
 @pytest.mark.asyncio
 async def test_se_get_pair_specific_config(signal_engine_v1):

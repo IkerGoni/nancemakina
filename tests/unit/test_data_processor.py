@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from unittest.mock import MagicMock, patch
 from collections import deque
+from datetime import datetime, timedelta
 
 from src.config_loader import ConfigManager
 from src.data_processor import DataProcessor, MAX_KLINE_BUFFER_LENGTH
@@ -20,7 +21,15 @@ def mock_config_manager_for_dp():
             "v1_strategy": {
                 "sma_short_period": 21,
                 "sma_long_period": 200,
-                "indicator_timeframes": ["1m", "5m", "15m"]
+                "indicator_timeframes": ["1m", "5m", "15m"],
+                "filters": {
+                    "volume": {
+                        "lookback_periods": 4
+                    },
+                    "volatility": {
+                        "lookback_periods": 3
+                    }
+                }
             }
         },
         "pairs": {
@@ -648,4 +657,127 @@ async def test_changing_timeframes_via_config_update(data_processor, mock_config
     # Check that new buffer for 30m timeframe was created
     assert "30m" in data_processor.kline_buffers["ETHUSDT"]
     assert isinstance(data_processor.kline_buffers["ETHUSDT"]["30m"], deque)
+
+def create_test_klines(num_klines=10, base_timestamp=1609459200000, symbol="BTCUSDT", interval="1m"):
+    """Helper to create a sequence of test klines."""
+    klines = []
+    for i in range(num_klines):
+        timestamp = base_timestamp + (i * 60000)  # Add minutes
+        klines.append(
+            Kline(
+                timestamp=timestamp,
+                open=100 + i,
+                high=110 + i,
+                low=90 + i,
+                close=105 + i,
+                volume=1000 + (i * 100),
+                is_closed=True,
+                symbol=symbol,
+                interval=interval
+            )
+        )
+    return klines
+
+def test_update_indicators_calculates_average_volume(data_processor):
+    """Test that _update_indicators correctly calculates average volume."""
+    # Setup
+    symbol = "BTCUSDT"
+    interval = "1m"
+    klines = create_test_klines(10, symbol=symbol, interval=interval)
+    
+    # Add klines to buffer
+    data_processor.kline_buffers[symbol][interval] = deque(klines)
+    
+    # Call method to test
+    data_processor._update_indicators(symbol, interval)
+    
+    # Get results
+    result_df = data_processor.indicator_data[symbol][interval]
+    
+    # Verify average volume calculated with correct window
+    assert "avg_volume" in result_df.columns
+    
+    # Since we configured lookback_periods as 4, let's check
+    # First 3 values should be NaN (not enough data points for window)
+    assert pd.isna(result_df["avg_volume"].iloc[0])
+    assert pd.isna(result_df["avg_volume"].iloc[1])
+    assert pd.isna(result_df["avg_volume"].iloc[2])
+    
+    # 4th value should be average of first 4 volumes
+    expected_avg = sum([klines[i].volume for i in range(4)]) / 4
+    assert result_df["avg_volume"].iloc[3] == pytest.approx(expected_avg)
+    
+    # Last value should be average of last 4 volumes
+    expected_last_avg = sum([klines[i].volume for i in range(6, 10)]) / 4
+    assert result_df["avg_volume"].iloc[9] == pytest.approx(expected_last_avg)
+
+def test_update_indicators_calculates_atr(data_processor):
+    """Test that _update_indicators correctly calculates ATR."""
+    # Setup
+    symbol = "BTCUSDT"
+    interval = "1m"
+    klines = create_test_klines(10, symbol=symbol, interval=interval)
+    
+    # Add klines to buffer
+    data_processor.kline_buffers[symbol][interval] = deque(klines)
+    
+    # Call method to test
+    data_processor._update_indicators(symbol, interval)
+    
+    # Get results
+    result_df = data_processor.indicator_data[symbol][interval]
+    
+    # Verify ATR calculated
+    assert "atr" in result_df.columns
+    
+    # Since we configured atr_period as 3, and ATR needs a previous candle
+    # First 3 values should be NaN (1 for previous candle + 3 for window)
+    assert pd.isna(result_df["atr"].iloc[0])
+    assert pd.isna(result_df["atr"].iloc[1])
+    assert pd.isna(result_df["atr"].iloc[2])
+    assert pd.isna(result_df["atr"].iloc[3])
+    
+    # 5th value onwards should have ATR
+    assert not pd.isna(result_df["atr"].iloc[4])
+    
+    # Manually calculate ATR for the 5th value (index 4)
+    # TR = max(high-low, abs(high-prevclose), abs(low-prevclose))
+    tr_values = []
+    for i in range(1, 4):  # We need 3 TR values (ATR window)
+        high = klines[i].high
+        low = klines[i].low
+        prev_close = klines[i-1].close
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        tr_values.append(tr)
+    
+    expected_atr = sum(tr_values) / 3
+    assert result_df["atr"].iloc[4] == pytest.approx(expected_atr, rel=1e-10)
+
+def test_update_indicators_handles_insufficient_data(data_processor):
+    """Test that _update_indicators handles cases with insufficient data gracefully."""
+    # Setup with just 2 klines (not enough for most calculations)
+    symbol = "BTCUSDT"
+    interval = "1m"
+    klines = create_test_klines(2, symbol=symbol, interval=interval)
+    
+    # Add klines to buffer
+    data_processor.kline_buffers[symbol][interval] = deque(klines)
+    
+    # Call method to test
+    data_processor._update_indicators(symbol, interval)
+    
+    # Get results
+    result_df = data_processor.indicator_data[symbol][interval]
+    
+    # Verify columns exist but values are NA due to insufficient data
+    assert "sma_short" in result_df.columns
+    assert "sma_long" in result_df.columns
+    assert "avg_volume" in result_df.columns
+    assert "atr" in result_df.columns
+    
+    # All ATR values should be NA (need at least 4 candles with our settings)
+    assert pd.isna(result_df["atr"]).all()
+    
+    # All avg_volume values should be NA (need at least 4 candles with our settings)
+    assert pd.isna(result_df["avg_volume"]).all()
 
