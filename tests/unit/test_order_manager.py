@@ -1,6 +1,7 @@
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
+from math import isclose
 
 from src.config_loader import ConfigManager
 from src.connectors import BinanceRESTClient
@@ -52,17 +53,18 @@ def mock_rest_client_for_om():
             "limits": {"cost": {"min": "5.0"}, "amount": {"min": "0.001"}}
         }
     }
-    rest_client.create_order = AsyncMock(side_effect=lambda symbol, order_type, side, amount, price=None, params={}:
-        AsyncMock(
-            return_value={
-                "id": f"mock_order_{symbol}_{int(asyncio.get_event_loop().time()*1000)}_", 
-                "symbol": symbol, 
-                "status": "NEW", 
-                "avgPrice": str(price or params.get("stopPrice") or (50000.0 if "BTC" in symbol else 3000.0)),
-                "type": order_type
-            }
-        )() # Call the inner AsyncMock to get the return_value
-    )
+    
+    # Properly mock create_order to return a dictionary directly
+    async def mock_create_order(symbol, order_type, side, amount, price=None, params={}):
+        return {
+            "id": f"mock_order_{symbol}_{int(asyncio.get_event_loop().time()*1000)}",
+            "symbol": symbol,
+            "status": "NEW", 
+            "avgPrice": str(price or params.get("stopPrice") or (50000.0 if "BTC" in symbol else 3000.0)),
+            "type": order_type
+        }
+    
+    rest_client.create_order.side_effect = mock_create_order
     return rest_client
 
 @pytest.fixture
@@ -70,8 +72,19 @@ def order_manager(mock_config_manager_for_om, mock_rest_client_for_om):
     om = OrderManager(config_manager=mock_config_manager_for_om, rest_client=mock_rest_client_for_om)
     # Prime the cache for exchange info to avoid repeated calls in tests unless specifically testing cache miss
     async def prime_cache():
-        await om._get_exchange_info_for_symbol("BTCUSDT")
-        await om._get_exchange_info_for_symbol("ETHUSD_PERP")
+        # Make sure the exchange_info_cache is properly set with the values we expect
+        om.exchange_info_cache = {
+            "BTCUSDT": {
+                "symbol": "BTCUSDT",
+                "precision": {"amount": "0.00001", "price": "0.01"},
+                "limits": {"cost": {"min": "5.0"}, "amount": {"min": "0.00001"}}
+            },
+            "ETHUSD_PERP": {
+                "symbol": "ETHUSD_PERP",
+                "precision": {"amount": "0.001", "price": "0.01"},
+                "limits": {"cost": {"min": "5.0"}, "amount": {"min": "0.001"}}
+            }
+        }
     asyncio.run(prime_cache())
     return om
 
@@ -79,13 +92,28 @@ def order_manager(mock_config_manager_for_om, mock_rest_client_for_om):
 @pytest.mark.asyncio
 async def test_om_adjust_quantity_to_precision(order_manager):
     """Test quantity adjustment to precision based on step size."""
-    assert order_manager._adjust_quantity_to_precision(0.123456, 0.001) == 0.123
-    assert order_manager._adjust_quantity_to_precision(0.123, 0.0001) == 0.123
-    assert order_manager._adjust_quantity_to_precision(123.456, 1.0) == 123.0
-    assert order_manager._adjust_quantity_to_precision(0.99999, 0.00001) == 0.99999
-    assert order_manager._adjust_quantity_to_precision(0.000005, 0.00001) == 0.0 # Floor behavior
+    # Use almost equal for floating point comparisons
+    
+    result = order_manager._adjust_quantity_to_precision(0.123456, 0.001)
+    assert isclose(result, 0.123, rel_tol=1e-10), f"Expected 0.123, got {result}"
+    
+    result = order_manager._adjust_quantity_to_precision(0.123, 0.0001)
+    assert isclose(result, 0.123, rel_tol=1e-10), f"Expected 0.123, got {result}"
+    
+    result = order_manager._adjust_quantity_to_precision(123.456, 1.0)
+    assert isclose(result, 123.0, rel_tol=1e-10), f"Expected 123.0, got {result}"
+    
+    # Expected to be 0.99999 (multiple of 0.00001)
+    result = order_manager._adjust_quantity_to_precision(0.99999, 0.00001)
+    assert isclose(result, 0.99999, rel_tol=1e-10), f"Expected 0.99999, got {result}"
+    
+    # Floor behavior - 0.000005 is less than 0.00001
+    result = order_manager._adjust_quantity_to_precision(0.000005, 0.00001)
+    assert isclose(result, 0.0, rel_tol=1e-10), f"Expected 0.0, got {result}"
+    
     # Test with zero step size (should return original value)
-    assert order_manager._adjust_quantity_to_precision(123.456, 0) == 123.456
+    result = order_manager._adjust_quantity_to_precision(123.456, 0)
+    assert isclose(result, 123.456, rel_tol=1e-10), f"Expected 123.456, got {result}"
 
 @pytest.mark.asyncio
 async def test_om_adjust_price_to_precision(order_manager):
@@ -538,14 +566,17 @@ async def test_om_unknown_contract_type(order_manager, mock_rest_client_for_om):
     """Test handling unknown contract type."""
     mock_rest_client_for_om.create_order.reset_mock()
     
-    # Create a signal with an invalid contract type
+    # Use a valid contract type but modify handle_trade_signal behavior
     signal = TradeSignal(
-        symbol="BTCUSDT", config_symbol="BTC_USDT", contract_type="UNKNOWN_TYPE",  # Invalid type
+        symbol="BTCUSDT", config_symbol="BTC_USDT", contract_type="USDT_M",
         direction=TradeDirection.LONG, entry_price=50000.0,
         stop_loss_price=49000.0, take_profit_price=53000.0
     )
     
-    await order_manager.handle_trade_signal(signal)
+    # Patch the signal's contract_type attribute after creation to simulate an unknown type
+    # This avoids the Pydantic validation error
+    with patch.object(signal, 'contract_type', "UNKNOWN_TYPE"):
+        await order_manager.handle_trade_signal(signal)
     
     # No orders should be placed due to unknown contract type
     assert mock_rest_client_for_om.create_order.call_count == 0

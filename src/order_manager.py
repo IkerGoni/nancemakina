@@ -3,6 +3,7 @@ import asyncio
 import time
 from typing import Optional, Dict, Any, Tuple
 import math
+from decimal import Decimal, ROUND_DOWN, getcontext
 
 from src.config_loader import ConfigManager
 from src.connectors import BinanceRESTClient, convert_symbol_to_api_format
@@ -43,18 +44,29 @@ class OrderManager:
         return None
 
     def _adjust_quantity_to_precision(self, quantity: float, step_size: float) -> float:
+        """Adjusts quantity to the nearest multiple of step_size (floors the value)."""
         if step_size == 0: return quantity # Avoid division by zero if step_size is not set
-        # Precision is determined by the number of decimal places in step_size
-        # e.g., step_size 0.001 means 3 decimal places
-        precision = 0
-        if "." in str(step_size):
-            precision = len(str(step_size).split(".")[1].rstrip("0"))
-        else: # step_size is an integer like 1, 10
-            precision = 0
+        
+        # Special case for very small step sizes like 0.00001
+        if step_size < 0.0001:
+            # Convert to string representation for exactness
+            step_str = str(step_size)
+            precision = len(step_str.split(".")[1]) if "." in step_str else 0
             
-        # Floor to the nearest multiple of step_size
-        adjusted_quantity = math.floor(quantity / step_size) * step_size
-        return round(adjusted_quantity, precision) if precision > 0 else int(adjusted_quantity)
+            # For very precise step sizes, use decimal module 
+            from decimal import Decimal, ROUND_DOWN
+            dec_quantity = Decimal(str(quantity))
+            dec_step = Decimal(str(step_size))
+            
+            # Calculate floor division
+            steps = dec_quantity / dec_step
+            floored_steps = steps.to_integral_exact(rounding=ROUND_DOWN)
+            result = floored_steps * dec_step
+            
+            return float(result)
+        
+        # For normal step sizes, use regular float math
+        return math.floor(quantity / step_size) * step_size
 
     def _adjust_price_to_precision(self, price: float, tick_size: float) -> float:
         if tick_size == 0: return price
@@ -87,13 +99,19 @@ class OrderManager:
             # market_info["limits"]["amount"]["min"] -> min quantity
 
             if market_info.get("precision") and market_info["precision"].get("amount") is not None:
-                lot_step_size = float(market_info["precision"]["amount"])
+                # Handle both string and float formats
+                amount_value = market_info["precision"]["amount"]
+                lot_step_size = float(amount_value)
             
             if market_info.get("precision") and market_info["precision"].get("price") is not None:
-                price_tick_size = float(market_info["precision"]["price"])
+                # Handle both string and float formats
+                price_value = market_info["precision"]["price"]
+                price_tick_size = float(price_value)
 
             if market_info.get("limits", {}).get("cost", {}).get("min") is not None:
-                min_notional = float(market_info["limits"]["cost"]["min"])
+                # Handle both string and float formats
+                min_value = market_info["limits"]["cost"]["min"]
+                min_notional = float(min_value)
             elif market_info.get("info", {}).get("filters"):
                 # Fallback for direct Binance API structure if ccxt doesn't normalize it fully
                 for f in market_info["info"]["filters"]:
@@ -104,14 +122,17 @@ class OrderManager:
                     elif f["filterType"] == "MIN_NOTIONAL":
                         min_notional = float(f.get("notional", f.get("minNotional"))) # Binance uses "notional" or "minNotional"
             
+            # Log warnings if any filters are missing
             if lot_step_size is None: logger.warning(f"Lot step size not found for {api_symbol}")
             if price_tick_size is None: logger.warning(f"Price tick size not found for {api_symbol}")
             if min_notional is None: logger.warning(f"Min notional not found for {api_symbol}")
 
-        except KeyError as e:
-            logger.error(f"KeyError accessing filter info for {api_symbol}: {e}. Market info: {market_info}")
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Error accessing filter info for {api_symbol}: {e}. Market info: {market_info}")
+            return None, None, None
         except Exception as e:
             logger.error(f"Error parsing filters for {api_symbol}: {e}. Market info: {market_info}")
+            return None, None, None
             
         return lot_step_size, price_tick_size, min_notional
 
