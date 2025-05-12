@@ -51,9 +51,14 @@ class PairConfig(BaseModel):
     @validator("symbol")
     def symbol_format(cls, value):
         # Basic validation, can be expanded
-        if "_" not in value and not value.endswith("PERP") and value.isupper():
-            pass 
-        elif "_" not in value:
+        if "_" in value:
+            # BTC_USDT format is valid
+            pass
+        elif value.endswith("PERP"):
+            # BTCUSD_PERP format is valid
+            pass
+        else:
+            # Neither BTC_USDT nor ending with PERP
             raise ValueError("Symbol in config should generally be in format BASE_QUOTE, e.g., BTC_USDT or end with PERP for COIN-M e.g. BTCUSD_PERP")
         return value
 

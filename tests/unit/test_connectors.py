@@ -1,5 +1,7 @@
 import pytest
 import asyncio
+import json
+import websockets
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from src.config_loader import ConfigManager
@@ -39,7 +41,7 @@ def mock_config_manager_for_connectors(tmp_path):
     
     # Patch ConfigManager to use this temp config file
     # and ensure singleton is reset for these tests
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
 
     with patch("src.config_loader.DEFAULT_CONFIG_PATH", str(config_file)):
@@ -47,7 +49,7 @@ def mock_config_manager_for_connectors(tmp_path):
         yield cm
     
     # Cleanup singleton after test
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
 
 # --- Test Symbol Conversion --- 
@@ -82,7 +84,7 @@ async def test_rest_client_initialization_no_api_keys(tmp_path):
     """
     with open(config_file, "w") as f:
         f.write(config_content)
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
     with patch("src.config_loader.DEFAULT_CONFIG_PATH", str(config_file)):
         cm = ConfigManager(auto_reload=False)
@@ -90,9 +92,11 @@ async def test_rest_client_initialization_no_api_keys(tmp_path):
         assert rest_client.exchange is None # Should be None if keys are placeholders
         # Test a call, should simulate or return default
         order = await rest_client.create_order("BTCUSDT", "MARKET", "BUY", 1.0)
-        assert order["id"] == "simulated_order_id"
+        # The order ID format includes a timestamp which we can't predict exactly,
+        # so we just check if it starts with "simulated_order"
+        assert order["id"].startswith("simulated_order")
         await rest_client.close_exchange()
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
 
 @pytest.mark.asyncio
@@ -144,6 +148,7 @@ async def test_ws_connector_subscribe_unsubscribe(mock_kline_callback):
                 "pairs": {"BTC_USDT": {"enabled": True, "contract_type": "USDT_M"}}
             }
         def register_callback(self, cb): pass
+        def unregister_callback(self, cb): pass
         def stop_watcher(self): pass
 
     ws_connector = BinanceWebSocketConnector(config_manager=MinimalMockConfigManager(), kline_callback=mock_kline_callback)
@@ -165,30 +170,47 @@ async def test_ws_connector_subscribe_unsubscribe(mock_kline_callback):
 @pytest.mark.asyncio
 async def test_ws_connector_process_kline_message(mock_config_manager_for_connectors, mock_kline_callback):
     ws_connector = BinanceWebSocketConnector(config_manager=mock_config_manager_for_connectors, kline_callback=mock_kline_callback)
-    kline_msg_str = 	{	
-        "e": "kline",
-        "E": 123456789,
-        "s": "BTCUSDT",
-        "k": {
-            "t": 123400000,
-            "T": 123459999,
+    
+    # Reset the mock to ensure it's clean
+    mock_kline_callback.reset_mock()
+    
+    # This is the correct message format that Binance sends, with a stream and data key
+    kline_msg_str = {
+        "stream": "btcusdt@kline_1m",
+        "data": {
+            "e": "kline",
+            "E": 123456789,
             "s": "BTCUSDT",
-            "i": "1m",
-            "o": "0.0010",
-            "c": "0.0020",
-            "h": "0.0025",
-            "l": "0.0015",
-            "v": "1000",
-            "n": 100,
-            "x": False, # Is kline closed?
-            "q": "1.0000",
-            "V": "500",
-            "Q": "0.500",
-            "B": "123456"
+            "k": {
+                "t": 123400000,
+                "T": 123459999,
+                "s": "BTCUSDT",
+                "i": "1m",
+                "o": "0.0010",
+                "c": "0.0020",
+                "h": "0.0025",
+                "l": "0.0015",
+                "v": "1000",
+                "n": 100,
+                "x": False, # Is kline closed?
+                "q": "1.0000",
+                "V": "500",
+                "Q": "0.500",
+                "B": "123456"
+            }
         }
-    }	
+    }
+    
+    # Convert to JSON string and process
     await ws_connector._process_message(json.dumps(kline_msg_str), "USDT_M")
+    
+    # Need to wait a tiny bit for the async call to complete
+    await asyncio.sleep(0.01)
+    
+    # Assert the callback was called
     mock_kline_callback.assert_called_once()
+    
+    # If assertion passes, check values
     called_kline_arg = mock_kline_callback.call_args[0][0]
     assert isinstance(called_kline_arg, Kline)
     assert called_kline_arg.symbol == "BTCUSDT"
@@ -201,7 +223,7 @@ async def test_ws_connector_start_stop_and_config_update_flow(mock_config_manage
     ws_connector = BinanceWebSocketConnector(config_manager=mock_config_manager_for_connectors, kline_callback=mock_kline_callback)
     
     # Patch the actual connection handler to prevent real WS connections during this unit test
-    with patch.object(ws_connector, 	_handle_connection	, new_callable=AsyncMock) as mock_handler:
+    with patch.object(ws_connector, "_handle_connection", new_callable=AsyncMock) as mock_handler:
         await ws_connector.start()
         assert ws_connector._is_running
         # _handle_config_update should have been called, leading to _handle_connection calls

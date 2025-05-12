@@ -2,6 +2,7 @@ import pytest
 import os
 import yaml
 import time
+import asyncio
 from unittest.mock import patch, mock_open
 
 from src.config_loader import ConfigManager, DEFAULT_CONFIG_PATH, EXAMPLE_CONFIG_PATH
@@ -26,15 +27,15 @@ def temp_config_files(tmp_path):
 @pytest.fixture
 def cleanup_singleton():
     # Reset the singleton instance before and after each test
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
-    if hasattr(ConfigManager, 	_initialized	):
+    if hasattr(ConfigManager, "_initialized"):
         # This is a bit of a hack; ideally, the singleton is designed to be reset or re-initialized for tests.
         # For this specific implementation, clearing _instance is the main thing.
-        # If __init__ has instance checks, we might need to delattr(ConfigManager, 	_initialized	) too.
+        # If __init__ has instance checks, we might need to delattr(ConfigManager, "_initialized") too.
         pass 
     yield
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
 
 @pytest.mark.asyncio

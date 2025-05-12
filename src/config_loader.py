@@ -114,6 +114,14 @@ class ConfigManager:
         else:
             logger.warning("Attempted to register a non-callable callback.")
 
+    def unregister_callback(self, callback):
+        """Remove a previously registered callback."""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+            logger.debug(f"Callback {callback.__name__ if hasattr(callback, '__name__') else callback} unregistered.")
+        else:
+            logger.warning(f"Attempted to unregister a callback that was not registered.")
+
     def _notify_callbacks(self):
         for callback in self._callbacks:
             try:
