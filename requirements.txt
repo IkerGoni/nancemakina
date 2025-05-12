@@ -1,0 +1,13 @@
+ccxt
+websockets
+PyYAML
+watchdog
+pandas
+numpy
+python-dotenv
+prometheus_client
+pytest
+tenacity
+apscheduler
+pydantic # For data models, if chosen
+

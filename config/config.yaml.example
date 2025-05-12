@@ -1,0 +1,111 @@
+# Binance Futures Trading Bot - Example Configuration
+# Copy this file to config.yaml and edit with your settings.
+
+api:
+  binance_api_key: "YOUR_BINANCE_API_KEY" # Your Binance API Key (ensure only Futures trading is enabled)
+  binance_api_secret: "YOUR_BINANCE_API_SECRET" # Your Binance API Secret
+  # For COIN-M, if different keys are needed, this structure might need adjustment or separate sections.
+  # For now, assuming same keys for USD-M and COIN-M or that ccxt handles it.
+
+global_settings:
+  # V1 Strategy Defaults (SMA Crossover)
+  v1_strategy:
+    sma_short_period: 21
+    sma_long_period: 200
+    # Minimum time in minutes between signals for the same pair to reduce noise
+    min_signal_interval_minutes: 15
+    # Take Profit = Risk * tp_sl_ratio. SL is based on recent support/resistance.
+    tp_sl_ratio: 3.0
+    # Default margin to use per trade if not specified per pair (for fixed margin allocation)
+    default_margin_usdt: 50.0 # For USDT-M pairs
+    # default_margin_coin: 0.1 # Example for COIN-M pairs (e.g., 0.1 BTC for BTCUSD_PERP)
+    # Default leverage if not specified per pair
+    default_leverage: 10
+    # Default margin mode: "ISOLATED" or "CROSSED"
+    margin_mode: "ISOLATED"
+    # Timeframes to calculate SMAs on (e.g., 1m, 5m, 15m, 1h, 4h). V1 uses 1m for signals.
+    # The data_processor will calculate for all these, signal_engine_v1 will use 1m.
+    indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"]
+
+  # V2 Strategy Defaults (to be detailed in Phase 2/3)
+  # v2_strategy:
+    # strategy_v2_enabled: false
+    # ... other V2 parameters ...
+
+  # General Risk Management (some may be V2 specific or advanced V1)
+  risk_management:
+    # For dynamic position sizing: risk this percentage of available balance per trade
+    dynamic_sizing_risk_percent: 1.0 # e.g., 1% of balance
+    # Enable dynamic position sizing (true/false). If false, uses fixed margin from v1_strategy.
+    dynamic_sizing_enabled: false
+    # volatility_based_leverage_enabled: false # Future enhancement
+
+  # Optional Filters (can be enabled/disabled globally or per pair)
+  filters:
+    volume_filter_enabled: false
+    # volume_avg_period: 50
+    # volume_threshold_ratio: 1.5 # Signal candle volume must be 1.5x the average
+
+    volatility_filter_enabled: false # Bollinger Bands width filter
+    # bb_period: 20
+    # bb_std_dev: 2
+    # bb_min_width_percentage: 0.5 # Min BB width as % of price to trade
+
+    # btc_correlation_filter_enabled: false # For altcoins, future enhancement
+    # max_funding_rate_threshold: 0.001 # Skip if abs(funding_rate) > 0.1%, future enhancement
+
+  # Exit Strategies (beyond SL/TP, future enhancements)
+  # exit_strategies:
+    # time_based_exit_enabled: false
+    # max_trade_duration_hours: 4
+    # reversal_exit_enabled: false
+
+pairs:
+  # USD-M Perpetual Contracts (Examples)
+  BTC_USDT:
+    enabled: true
+    # Override global V1 settings if needed
+    # sma_short_period: 10
+    # margin_mode: "CROSSED"
+    # leverage: 20
+    # margin_usdt: 100 # Specific margin for this USDT-M pair
+    # dynamic_sizing_enabled: true # Override global dynamic sizing
+    # risk_percent_per_trade: 0.5 # Override global risk percent
+
+  ETH_USDT:
+    enabled: true
+    # leverage: 15
+    # margin_usdt: 75
+
+  # COIN-M Perpetual Contracts (Examples)
+  # Note: For COIN-M, margin is specified in the base currency (e.g., BTC for BTCUSD_PERP)
+  # The bot will need to handle this distinction for position sizing and P&L.
+  BTCUSD_PERP: # Binance symbol for BTC/USD COIN-M Perpetual
+    enabled: false
+    # margin_coin: 0.01 # e.g., 0.01 BTC for this pair
+    # leverage: 10
+    # contract_type: "COIN_M" # Explicitly marking, though symbol format might imply it
+
+  ETHUSD_PERP:
+    enabled: false
+    # margin_coin: 0.1 # e.g., 0.1 ETH
+    # leverage: 10
+    # contract_type: "COIN_M"
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+  # Log file path (optional, if not specified, logs to console and default app.log)
+  # log_file: "/path/to/your/custom_app.log"
+
+monitoring:
+  prometheus_port: 8000 # Port for Prometheus metrics endpoint
+
+backtesting: # Configuration for backtesting module (future phase)
+  # start_date: "2023-01-01T00:00:00Z"
+  # end_date: "2023-12-31T23:59:59Z"
+  # initial_balance_usdt: 10000
+  # initial_balance_coin: { "BTC": 1, "ETH": 10 } # For COIN-M backtesting
+  # slippage_percent: 0.01 # 0.01% slippage
+  # fee_percent: 0.04    # 0.04% trading fee (taker)
+

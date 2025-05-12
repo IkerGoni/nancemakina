@@ -1,0 +1,59 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+---
+title: Binance Futures Trading Bot Rules
+description: Guidelines for AI assistance with this trading bot project
+---
+
+# Project Overview
+This is a Binance Futures Trading Bot that implements automated trading strategies for cryptocurrency futures markets. The bot connects to Binance API (both USDT-M and Coin-M perpetual futures), processes market data, generates trading signals based on technical indicators, and executes trades according to predefined risk management rules.
+
+# Code Style
+- Use Python 3.11+ compatible code
+- Follow PEP 8 style guidelines
+- Use type hints for all function parameters and return values
+- Prefer async/await patterns for I/O operations
+- Use descriptive variable and function names
+- Add docstrings to all classes and public methods
+
+# Architecture Guidelines
+- Maintain clear separation between components (connectors, data processing, signal generation, order management)
+- Use dependency injection for better testability
+- Implement proper error handling and logging
+- Ensure all external API calls have appropriate error handling and retry mechanisms
+- Use configuration files for all adjustable parameters
+
+# Trading Strategy Implementation
+- The primary V1 strategy uses SMA 21 crossing SMA 200 on various timeframes
+- Stop loss should be based on recent pivot points
+- Take profit should be calculated using risk-reward ratio from config
+- Implement buffer periods to avoid false signals
+- Support both USDT-M and Coin-M contract types
+
+# Security Considerations
+- Never hardcode API keys or secrets
+- Use environment variables or secure config files
+- Implement proper error handling for API responses
+- Validate all user inputs and configuration parameters
+- Log sensitive operations but never log credentials
+
+# Testing Requirements
+- Write unit tests for all core components
+- Mock external API calls in tests
+- Include integration tests for critical workflows
+- Test error handling and edge cases
+
+# Documentation Standards
+- Maintain comprehensive README with setup and usage instructions
+- Document all configuration options
+- Include architecture diagrams where helpful
+- Provide troubleshooting guides for common issues
+
+# Performance Considerations
+- Optimize memory usage for long-running processes
+- Implement connection pooling for API requests
+- Use efficient data structures for time series data
+- Consider resource usage when processing large datasets
