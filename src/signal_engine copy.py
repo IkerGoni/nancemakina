@@ -37,22 +37,15 @@ class SignalEngineV1:
 
     def _find_recent_pivot(self, klines_df: pd.DataFrame, lookback: int = 10, direction: TradeDirection = TradeDirection.LONG) -> Optional[float]:
         """Finds the most recent significant pivot low (for LONG) or high (for SHORT)."""
-        logger.debug(f"_find_recent_pivot called with lookback={lookback}, direction={direction.value}")
-        
         if klines_df is None or klines_df.empty or len(klines_df) < 3:
-            logger.debug(f"Insufficient data for pivot: df exists: {klines_df is not None}, empty: {klines_df.empty if klines_df is not None else True}, len: {len(klines_df) if klines_df is not None else 0}")
             return None
 
         # Ensure we only look at a recent window of closed candles for pivots
         # The signal candle itself is usually the last one, so we look before it.
         relevant_klines = klines_df[klines_df["is_closed"]].iloc[-lookback-1:-1] # Look at N closed candles before the signal candle
-        logger.debug(f"Found {len(relevant_klines)} closed candles in the lookback window")
-        
         if len(relevant_klines) < 3:
              relevant_klines = klines_df[klines_df["is_closed"]].iloc[-len(klines_df):-1] # use all available if not enough
-             logger.debug(f"Using all available {len(relevant_klines)} closed candles")
              if len(relevant_klines) < 3:
-                logger.debug("Still insufficient data for pivot calculation (need at least 3 candles)")
                 return None
 
         if direction == TradeDirection.LONG:
@@ -60,23 +53,18 @@ class SignalEngineV1:
             # For simplicity, let\"s find the minimum low in the lookback window as a proxy for recent support
             # A more robust pivot detection would use scipy.signal.find_peaks or similar
             min_low = relevant_klines["low"].min()
-            logger.debug(f"For LONG direction, found pivot low at {min_low}")
             return min_low
         else: # TradeDirection.SHORT
             # Find pivot highs: high[i] > high[i-1] and high[i] > high[i+1]
             # For simplicity, let\"s find the maximum high in the lookback window as a proxy for recent resistance
             max_high = relevant_klines["high"].max()
-            logger.debug(f"For SHORT direction, found pivot high at {max_high}")
             return max_high
 
     async def check_signal(self, api_symbol: str, config_symbol: str) -> Optional[TradeSignal]:
         """Checks for a V1 SMA crossover signal for the given API symbol (e.g., BTCUSDT)."""
-        # DEBUG: Entry to check_signal
-        logger.debug(f"Entering check_signal for {api_symbol}, timestamp: {time.time()}")
-        
         pair_config = self._get_pair_specific_config(config_symbol)
         if not pair_config: 
-            logger.debug(f"No configuration found for {config_symbol} in SignalEngineV1")
+            # logger.debug(f"No configuration found for {config_symbol} in SignalEngineV1")
             return None
 
         # V1 strategy uses 1-minute timeframe for signals
@@ -84,7 +72,7 @@ class SignalEngineV1:
         df = self.data_processor.get_indicator_dataframe(api_symbol, signal_interval)
 
         if df is None or df.empty or len(df) < 2:
-            logger.debug(f"Not enough data for {api_symbol} {signal_interval} to generate signal. df exists: {df is not None}, empty: {df.empty if df is not None else True}, len: {len(df) if df is not None else 0}")
+            # logger.debug(f"Not enough data for {api_symbol} {signal_interval} to generate signal.")
             return None
 
         # Get the latest two candles for crossover detection
@@ -95,23 +83,20 @@ class SignalEngineV1:
         sma_long_col = "sma_long"
 
         if not all(col in latest.index and col in previous.index for col in [sma_short_col, sma_long_col, "close", "is_closed"]):
-            logger.debug(f"SMA data not available for {api_symbol} {signal_interval}. Columns in latest: {list(latest.index)}")
+            # logger.debug(f"SMA data not available for {api_symbol} {signal_interval}.")
             return None
         
         # Ensure latest candle data is present and SMAs are calculated
         if pd.isna(latest[sma_short_col]) or pd.isna(latest[sma_long_col]) or \
            pd.isna(previous[sma_short_col]) or pd.isna(previous[sma_long_col]):
-            logger.debug(f"SMA values are NA for {api_symbol} {signal_interval}. Latest: {latest[sma_short_col]}, {latest[sma_long_col]}. Previous: {previous[sma_short_col]}, {previous[sma_long_col]}")
+            # logger.debug(f"SMA values are NA for {api_symbol} {signal_interval}. Latest: {latest[sma_short_col]}, {latest[sma_long_col]}. Previous: {previous[sma_short_col]}, {previous[sma_long_col]}")
             return None
-
-        # DEBUG: Log SMA values for debugging
-        logger.debug(f"SMA values for {api_symbol}: Latest short={latest[sma_short_col]}, long={latest[sma_long_col]}. Previous short={previous[sma_short_col]}, long={previous[sma_long_col]}")
 
         # --- Significance Filter (Time-based) ---
         min_interval_seconds = pair_config["min_signal_interval_minutes"] * 60
         current_time = time.time()
         if api_symbol in self.last_signal_time and (current_time - self.last_signal_time[api_symbol]) < min_interval_seconds:
-            logger.debug(f"Signal for {api_symbol} too soon. Last signal at {self.last_signal_time[api_symbol]}, current: {current_time}, min_interval: {min_interval_seconds}")
+            # logger.debug(f"Signal for {api_symbol} too soon. Last signal at {self.last_signal_time[api_symbol]}, current: {current_time}")
             return None
 
         # --- SMA Crossover Detection ---
@@ -125,65 +110,47 @@ class SignalEngineV1:
         crossed_down = (previous[sma_short_col] >= previous[sma_long_col] and
                         latest[sma_short_col] < latest[sma_long_col])
 
-        # DEBUG: Log crossover detection
-        logger.debug(f"Crossover detection for {api_symbol}: crossed_up={crossed_up}, crossed_down={crossed_down}")
-
         signal_direction: Optional[TradeDirection] = None
         if crossed_up:
             signal_direction = TradeDirection.LONG
-            logger.debug(f"LONG signal detected for {api_symbol}")
         elif crossed_down:
             signal_direction = TradeDirection.SHORT
-            logger.debug(f"SHORT signal detected for {api_symbol}")
         else:
-            logger.debug(f"No crossover detected for {api_symbol}")
             return None # No crossover
 
         # --- SL/TP Calculation ---
         entry_price = latest["close"] # Current close price as entry
-        logger.debug(f"Entry price for {api_symbol}: {entry_price}")
-        
         stop_loss_price: Optional[float] = None
         take_profit_price: Optional[float] = None
         tp_sl_ratio = pair_config["tp_sl_ratio"]
 
-        # Standard pivot lookback for production use
-        pivot_lookback = 30
-        logger.debug(f"Using standard pivot_lookback={pivot_lookback}")
+        # Use a lookback of N candles for pivot detection, e.g., 20-50 candles for 1m chart
+        # The klines for pivot detection should be from the main DataFrame `df`
+        pivot_lookback = 30 # Number of 1-minute candles to look back for pivot
 
         if signal_direction == TradeDirection.LONG:
             pivot_low = self._find_recent_pivot(df, lookback=pivot_lookback, direction=TradeDirection.LONG)
-            logger.debug(f"LONG signal - find_recent_pivot result for {api_symbol}: pivot_low={pivot_low}")
-            
             if pivot_low is not None:
                 # Add a small buffer to SL, e.g., a few ticks or a percentage
                 # For simplicity, direct use for now. Buffer can be added from config.
                 stop_loss_price = pivot_low 
                 risk = entry_price - stop_loss_price
-                logger.debug(f"Calculated risk for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}")
-                
                 if risk <= 0: # Invalid SL (e.g. pivot_low >= entry_price)
-                    logger.warning(f"Invalid SL for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}. Skipping signal.")
+                    logger.warning(f"Invalid SL for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}. Skipping signal.")
                     return None
                 take_profit_price = entry_price + (risk * tp_sl_ratio)
-                logger.debug(f"Calculated TP for LONG {api_symbol}: TP={take_profit_price} (risk={risk} * ratio={tp_sl_ratio})")
             else:
                 logger.warning(f"Could not determine pivot low for LONG SL for {api_symbol}. Skipping signal.")
                 return None
         else: # TradeDirection.SHORT
             pivot_high = self._find_recent_pivot(df, lookback=pivot_lookback, direction=TradeDirection.SHORT)
-            logger.debug(f"SHORT signal - find_recent_pivot result for {api_symbol}: pivot_high={pivot_high}")
-            
             if pivot_high is not None:
                 stop_loss_price = pivot_high
                 risk = stop_loss_price - entry_price
-                logger.debug(f"Calculated risk for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}")
-                
                 if risk <= 0: # Invalid SL (e.g. pivot_high <= entry_price)
-                    logger.warning(f"Invalid SL for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}. Skipping signal.")
+                    logger.warning(f"Invalid SL for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}. Skipping signal.")
                     return None
                 take_profit_price = entry_price - (risk * tp_sl_ratio)
-                logger.debug(f"Calculated TP for SHORT {api_symbol}: TP={take_profit_price} (risk={risk} * ratio={tp_sl_ratio})")
             else:
                 logger.warning(f"Could not determine pivot high for SHORT SL for {api_symbol}. Skipping signal.")
                 return None
@@ -216,7 +183,6 @@ class SignalEngineV1:
             interval=signal_interval
         )
 
-        logger.debug(f"Successfully created TradeSignal for {api_symbol}: {signal_direction.value} at {entry_price}")
         return TradeSignal(
             symbol=api_symbol,
             config_symbol=config_symbol,

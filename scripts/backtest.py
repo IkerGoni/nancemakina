@@ -150,21 +150,58 @@ class Backtester:
         original_last_signal_time = self.signal_engine.last_signal_time.copy()
         self.signal_engine.last_signal_time = {}
         
-        # Iterate through each row (simulating the passage of time)
-        for i in range(2, len(df)):  # Start from 2 to have previous candle data
-            # Get current and previous rows
-            current_row = df.iloc[i]
+        # Add debug info about the dataframe
+        logger.info(f"DataFrame shape: {df.shape}, columns: {df.columns.tolist()}")
+        logger.info(f"First few rows of DataFrame:\n{df.head(2)}")
+        
+        # Add debug logging for SMA values
+        valid_sma_rows = df[pd.notna(df['sma_short']) & pd.notna(df['sma_long'])]
+        logger.info(f"Number of rows with valid SMA calculations: {len(valid_sma_rows)} out of {len(df)}")
+        
+        if len(valid_sma_rows) > 0:
+            # Log some sample rows to check for crossover potential
+            logger.info(f"First 5 valid SMA rows:\n{valid_sma_rows[['close', 'sma_short', 'sma_long']].head(5)}")
             
-            # Check if we have valid SMA calculations
-            if pd.notna(current_row['sma_short']) and pd.notna(current_row['sma_long']):
-                # Generate signal for current state
-                signal = await self.signal_engine.check_signal(symbol, config_symbol)
+            # Temporarily make the dataframe accessible to the signal engine
+            # Store the original data to restore later
+            original_df = self.data_processor.indicator_data.get(symbol, {}).get("1m", None)
+            self.data_processor.indicator_data.setdefault(symbol, {})["1m"] = valid_sma_rows
+            
+            # Iterate through each potential signal candle
+            for i in range(1, len(valid_sma_rows)):
+                current = valid_sma_rows.iloc[i]
+                previous = valid_sma_rows.iloc[i-1]
                 
-                if signal:
-                    signals.append(signal)
-                    logger.info(f"Signal generated at {datetime.fromtimestamp(signal.timestamp/1000)}: "
-                               f"{signal.direction.value} at {signal.entry_price}, "
-                               f"SL={signal.stop_loss_price}, TP={signal.take_profit_price}")
+                # Log potential crossovers for debugging
+                crossed_up = (previous['sma_short'] <= previous['sma_long'] and 
+                             current['sma_short'] > current['sma_long'])
+                crossed_down = (previous['sma_short'] >= previous['sma_long'] and
+                               current['sma_short'] < current['sma_long'])
+                
+                if crossed_up or crossed_down:
+                    logger.debug(f"Potential crossover at index {i}, timestamp: {current.name}")
+                    logger.debug(f"Previous: short={previous['sma_short']}, long={previous['sma_long']}")
+                    logger.debug(f"Current: short={current['sma_short']}, long={current['sma_long']}")
+                    
+                    # Set up a specific slice of data for this timestamp to check for signals
+                    kline_slice = valid_sma_rows[:i+1]  # Include data up to current point only
+                    self.data_processor.indicator_data[symbol]["1m"] = kline_slice
+                    
+                    # Check for signal at this point using the signal engine
+                    signal = await self.signal_engine.check_signal(symbol, config_symbol)
+                    
+                    if signal:
+                        # Custom field to store the timestamp for the backtest simulation
+                        signal.timestamp = int(current.name)
+                        signals.append(signal)
+                        logger.info(f"Generated {signal.direction.value} signal at {datetime.fromtimestamp(current.name/1000)}")
+            
+            # Restore the original dataframe
+            if original_df is not None:
+                self.data_processor.indicator_data[symbol]["1m"] = original_df
+            else:
+                if symbol in self.data_processor.indicator_data and "1m" in self.data_processor.indicator_data[symbol]:
+                    del self.data_processor.indicator_data[symbol]["1m"]
         
         # Restore the original last_signal_time
         self.signal_engine.last_signal_time = original_last_signal_time
