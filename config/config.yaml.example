@@ -24,10 +24,60 @@ global_settings:
     # Default margin mode: "ISOLATED" or "CROSSED"
     margin_mode: "ISOLATED"
     # Fallback SL percentage when pivot-based SL calculation fails or gives invalid results
+    # DEPRECATED: Use sl_options.percentage_settings.value instead
     fallback_sl_percentage: 0.02 # Default 2% from entry
     # Timeframes to calculate SMAs on (e.g., 1m, 5m, 15m, 1h, 4h). V1 uses 1m for signals.
     # The data_processor will calculate for all these, signal_engine_v1 will use 1m.
     indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"]
+    
+    # New configurable filters
+    filters:
+      # Buffer Time Filter - requires consecutive candles to confirm a crossover
+      buffer_time:
+        enabled: false  # Set to true to activate buffer time filter
+        candles: 2      # Number of consecutive candles required to confirm signal
+      
+      # Volume Filter - requires higher than average volume for valid signals
+      volume:
+        enabled: false  # Set to true to activate volume filter
+        lookback_periods: 20   # Number of candles to look back for average calculation
+        min_threshold: 1.5     # Minimum volume as multiplier of average (e.g., 1.5x average)
+      
+      # Volatility Filter - requires adequate volatility for valid signals
+      volatility:
+        enabled: false  # Set to true to activate volatility filter
+        indicator: "atr"  # Indicator to use: "atr", "bb_width", etc.
+        lookback_periods: 14   # Lookback period for volatility calculation
+        min_threshold: 0.002   # Minimum volatility as percentage of price
+        max_threshold: 0.05    # Maximum volatility as percentage of price
+    
+    # Stop Loss configuration options
+    sl_options:
+      primary_type: "pivot"  # Options: "pivot", "percentage"
+      
+      # Settings for pivot-based stop loss
+      pivot_settings:
+        lookback_candles: 30  # Number of candles to look back for pivot point
+      
+      # Settings for percentage-based stop loss
+      percentage_settings:
+        value: 0.02  # Stop loss as percentage of entry price (2%)
+      
+      # Fallback settings when primary method fails or gives invalid results
+      enable_fallback: true  # Whether to use fallback method if primary fails
+      fallback_type: "percentage"  # Currently only "percentage" is supported
+    
+    # Take Profit configuration options
+    tp_options:
+      primary_type: "rr_ratio"  # Options: "rr_ratio", "fixed_percentage"
+      
+      # Settings for risk-reward ratio based take profit
+      rr_ratio_settings:
+        value: 3.0  # Take profit at 3x the risk (entry to stop loss distance)
+      
+      # Settings for fixed percentage based take profit
+      fixed_percentage_settings:
+        value: 0.06  # Take profit at 6% from entry price
 
   # V2 Strategy Defaults (to be detailed in Phase 2/3)
   # v2_strategy:
@@ -42,26 +92,6 @@ global_settings:
     dynamic_sizing_enabled: false
     # volatility_based_leverage_enabled: false # Future enhancement
 
-  # Optional Filters (can be enabled/disabled globally or per pair)
-  filters:
-    volume_filter_enabled: false
-    # volume_avg_period: 50
-    # volume_threshold_ratio: 1.5 # Signal candle volume must be 1.5x the average
-
-    volatility_filter_enabled: false # Bollinger Bands width filter
-    # bb_period: 20
-    # bb_std_dev: 2
-    # bb_min_width_percentage: 0.5 # Min BB width as % of price to trade
-
-    # btc_correlation_filter_enabled: false # For altcoins, future enhancement
-    # max_funding_rate_threshold: 0.001 # Skip if abs(funding_rate) > 0.1%, future enhancement
-
-  # Exit Strategies (beyond SL/TP, future enhancements)
-  # exit_strategies:
-    # time_based_exit_enabled: false
-    # max_trade_duration_hours: 4
-    # reversal_exit_enabled: false
-
 pairs:
   # USD-M Perpetual Contracts (Examples)
   BTC_USDT:
@@ -73,6 +103,25 @@ pairs:
     # margin_usdt: 100 # Specific margin for this USDT-M pair
     # dynamic_sizing_enabled: true # Override global dynamic sizing
     # risk_percent_per_trade: 0.5 # Override global risk percent
+    
+    # Pair-specific filter overrides
+    # filters:
+    #   buffer_time:
+    #     enabled: true
+    #     candles: 3
+    #   volume:
+    #     enabled: true
+    #     min_threshold: 2.0
+    
+    # Pair-specific SL/TP overrides
+    # sl_options:
+    #   primary_type: "percentage"
+    #   percentage_settings:
+    #     value: 0.015
+    # tp_options:
+    #   primary_type: "fixed_percentage"
+    #   fixed_percentage_settings:
+    #     value: 0.045
 
   ETH_USDT:
     enabled: true

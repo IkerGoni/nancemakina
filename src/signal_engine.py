@@ -1,7 +1,7 @@
 import logging
 import time
 import pandas as pd
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 from src.config_loader import ConfigManager
 from src.data_processor import DataProcessor
@@ -22,7 +22,7 @@ class SignalEngineV1:
         global_v1_config = config.get("global_settings", {}).get("v1_strategy", {})
         pair_config = config.get("pairs", {}).get(config_symbol, {})
         
-        # Merge global defaults with pair-specific settings
+        # Merge core parameters from global defaults with pair-specific settings
         merged_config = {
             "sma_short_period": pair_config.get("sma_short_period", global_v1_config.get("sma_short_period", 21)),
             "sma_long_period": pair_config.get("sma_long_period", global_v1_config.get("sma_long_period", 200)),
@@ -31,7 +31,7 @@ class SignalEngineV1:
             "leverage": pair_config.get("leverage", global_v1_config.get("default_leverage", 10)),
             "margin_mode": pair_config.get("margin_mode", global_v1_config.get("margin_mode", "ISOLATED")),
             "contract_type": pair_config.get("contract_type", "USD_M"),  # Default to USD-M
-            "fallback_sl_percentage": pair_config.get("fallback_sl_percentage", global_v1_config.get("fallback_sl_percentage", 0.02))  # Add fallback SL percentage
+            "fallback_sl_percentage": pair_config.get("fallback_sl_percentage", global_v1_config.get("fallback_sl_percentage", 0.02)),
         }
         
         # Handle margin amount based on contract type
@@ -39,7 +39,99 @@ class SignalEngineV1:
             merged_config["margin_usdt"] = pair_config.get("margin_usdt", global_v1_config.get("default_margin_usdt", 50.0))
         else:  # COIN_M
             merged_config["margin_coin"] = pair_config.get("margin_coin", global_v1_config.get("default_margin_coin", 0.01))
-            
+        
+        # --- Merge Filter Configurations ---
+        # Get global filter configs with defaults
+        global_filters = global_v1_config.get("filters", {})
+        pair_filters = pair_config.get("filters", {})
+        
+        # Initialize filters structure
+        merged_config["filters"] = {
+            "buffer_time": {
+                "enabled": False,
+                "candles": 2
+            },
+            "volume": {
+                "enabled": False,
+                "lookback_periods": 20,
+                "min_threshold": 1.5
+            },
+            "volatility": {
+                "enabled": False,
+                "indicator": "atr",
+                "lookback_periods": 14,
+                "min_threshold": 0.002,
+                "max_threshold": 0.05
+            }
+        }
+        
+        # Buffer Time Filter
+        buffer_time_global = global_filters.get("buffer_time", {})
+        buffer_time_pair = pair_filters.get("buffer_time", {})
+        merged_config["filters"]["buffer_time"] = {
+            "enabled": buffer_time_pair.get("enabled", buffer_time_global.get("enabled", False)),
+            "candles": buffer_time_pair.get("candles", buffer_time_global.get("candles", 2))
+        }
+        
+        # Volume Filter
+        volume_global = global_filters.get("volume", {})
+        volume_pair = pair_filters.get("volume", {})
+        merged_config["filters"]["volume"] = {
+            "enabled": volume_pair.get("enabled", volume_global.get("enabled", False)),
+            "lookback_periods": volume_pair.get("lookback_periods", volume_global.get("lookback_periods", 20)),
+            "min_threshold": volume_pair.get("min_threshold", volume_global.get("min_threshold", 1.5))
+        }
+        
+        # Volatility Filter
+        volatility_global = global_filters.get("volatility", {})
+        volatility_pair = pair_filters.get("volatility", {})
+        merged_config["filters"]["volatility"] = {
+            "enabled": volatility_pair.get("enabled", volatility_global.get("enabled", False)),
+            "indicator": volatility_pair.get("indicator", volatility_global.get("indicator", "atr")),
+            "lookback_periods": volatility_pair.get("lookback_periods", volatility_global.get("lookback_periods", 14)),
+            "min_threshold": volatility_pair.get("min_threshold", volatility_global.get("min_threshold", 0.002)),
+            "max_threshold": volatility_pair.get("max_threshold", volatility_global.get("max_threshold", 0.05))
+        }
+        
+        # --- Merge SL Options ---
+        global_sl_options = global_v1_config.get("sl_options", {})
+        pair_sl_options = pair_config.get("sl_options", {})
+        
+        # Initialize SL options structure with default values
+        merged_config["sl_options"] = {
+            "primary_type": pair_sl_options.get("primary_type", global_sl_options.get("primary_type", "pivot")),
+            "pivot_settings": {
+                "lookback_candles": pair_sl_options.get("pivot_settings", {}).get("lookback_candles", 
+                                  global_sl_options.get("pivot_settings", {}).get("lookback_candles", 30))
+            },
+            "percentage_settings": {
+                "value": pair_sl_options.get("percentage_settings", {}).get("value", 
+                        global_sl_options.get("percentage_settings", {}).get("value", 
+                        merged_config["fallback_sl_percentage"]))  # Default to fallback_sl_percentage if not set
+            },
+            "enable_fallback": pair_sl_options.get("enable_fallback", global_sl_options.get("enable_fallback", True)),
+            "fallback_type": pair_sl_options.get("fallback_type", global_sl_options.get("fallback_type", "percentage"))
+        }
+        
+        # --- Merge TP Options ---
+        global_tp_options = global_v1_config.get("tp_options", {})
+        pair_tp_options = pair_config.get("tp_options", {})
+        
+        # Initialize TP options structure with default values
+        merged_config["tp_options"] = {
+            "primary_type": pair_tp_options.get("primary_type", global_tp_options.get("primary_type", "rr_ratio")),
+            "rr_ratio_settings": {
+                "value": pair_tp_options.get("rr_ratio_settings", {}).get("value", 
+                        global_tp_options.get("rr_ratio_settings", {}).get("value", 
+                        merged_config["tp_sl_ratio"]))  # Default to tp_sl_ratio if not set
+            },
+            "fixed_percentage_settings": {
+                "value": pair_tp_options.get("fixed_percentage_settings", {}).get("value", 
+                        global_tp_options.get("fixed_percentage_settings", {}).get("value", 0.06))  # Default 6%
+            }
+        }
+        
+        logger.debug(f"Merged config for {config_symbol}: {merged_config}")
         return merged_config
 
     def _find_recent_pivot(self, klines_df: pd.DataFrame, lookback: int = 10, direction: TradeDirection = TradeDirection.LONG) -> Optional[float]:
@@ -76,20 +168,232 @@ class SignalEngineV1:
             logger.debug(f"For SHORT direction, found pivot high at {max_high}")
             return max_high
 
+    def _passes_buffer_time_filter(self, df: pd.DataFrame, buffer_config: Dict[str, Any], direction: TradeDirection) -> bool:
+        """
+        Checks if the crossover has been maintained for the specified number of candles.
+        
+        Args:
+            df: DataFrame containing price and indicator data
+            buffer_config: Configuration for buffer time filter
+            direction: Direction of the trade (LONG or SHORT)
+            
+        Returns:
+            True if filter passes, False if it fails
+        """
+        if not buffer_config.get("enabled", False):
+            logger.debug("Buffer time filter not enabled, passing")
+            return True
+            
+        required_candles = buffer_config.get("candles", 2)
+        logger.debug(f"Buffer time filter checking for {required_candles} candles of consistent crossover")
+        
+        if len(df) < required_candles + 1:  # +1 for the candle before crossover
+            logger.warning(f"Not enough candles to check buffer time filter. Need at least {required_candles + 1}, got {len(df)}")
+            return False
+            
+        # Get the required number of most recent candles plus one before
+        relevant_candles = df.iloc[-(required_candles+1):]
+        sma_short_col = "sma_short"
+        sma_long_col = "sma_long"
+        
+        # Verify all required candles have the crossover maintained
+        if direction == TradeDirection.LONG:
+            # First candle should show SMA short <= SMA long (not yet crossed)
+            # All subsequent candles should show SMA short > SMA long (crossed and maintained)
+            first_candle = relevant_candles.iloc[0]
+            subsequent_candles = relevant_candles.iloc[1:]
+            
+            if not (first_candle[sma_short_col] <= first_candle[sma_long_col]):
+                logger.debug("Buffer time filter failed: first candle already shows crossover up")
+                return False
+                
+            for i, candle in subsequent_candles.iterrows():
+                if not (candle[sma_short_col] > candle[sma_long_col]):
+                    logger.debug(f"Buffer time filter failed: candle at index {i} doesn't maintain crossover up")
+                    return False
+                    
+        else:  # TradeDirection.SHORT
+            # First candle should show SMA short >= SMA long (not yet crossed down)
+            # All subsequent candles should show SMA short < SMA long (crossed down and maintained)
+            first_candle = relevant_candles.iloc[0]
+            subsequent_candles = relevant_candles.iloc[1:]
+            
+            if not (first_candle[sma_short_col] >= first_candle[sma_long_col]):
+                logger.debug("Buffer time filter failed: first candle already shows crossover down")
+                return False
+                
+            for i, candle in subsequent_candles.iterrows():
+                if not (candle[sma_short_col] < candle[sma_long_col]):
+                    logger.debug(f"Buffer time filter failed: candle at index {i} doesn't maintain crossover down")
+                    return False
+        
+        logger.debug(f"Buffer time filter passed: crossover maintained for {required_candles} candles")
+        return True
+        
+    def _calculate_percentage_sl(self, entry_price: float, direction: TradeDirection, percentage_value: float) -> float:
+        """
+        Calculate stop loss based on a percentage from entry price.
+        
+        Args:
+            entry_price: Entry price of the trade
+            direction: Direction of the trade (LONG or SHORT)
+            percentage_value: Percentage to use for calculation (e.g., 0.02 for 2%)
+            
+        Returns:
+            Calculated stop loss price
+        """
+        logger.debug(f"Calculating percentage-based SL with entry={entry_price}, direction={direction.value}, percentage={percentage_value}")
+        
+        if direction == TradeDirection.LONG:
+            # For long positions, SL is below entry
+            stop_loss_price = entry_price * (1 - percentage_value)
+        else:  # TradeDirection.SHORT
+            # For short positions, SL is above entry
+            stop_loss_price = entry_price * (1 + percentage_value)
+            
+        logger.debug(f"Calculated percentage-based SL: {stop_loss_price}")
+        return stop_loss_price
+        
+    def _calculate_stop_loss(self, entry_price: float, direction: TradeDirection, df: pd.DataFrame, sl_config: Dict[str, Any]) -> Optional[float]:
+        """
+        Calculate stop loss price based on configuration.
+        
+        Args:
+            entry_price: Entry price of the trade
+            direction: Direction of the trade (LONG or SHORT)
+            df: DataFrame containing price data for pivot calculation
+            sl_config: Configuration for stop loss calculation
+            
+        Returns:
+            Calculated stop loss price or None if calculation fails
+        """
+        primary_type = sl_config.get("primary_type", "pivot")
+        logger.debug(f"Calculating stop loss with primary_type={primary_type}, direction={direction.value}")
+        
+        stop_loss_price = None
+        
+        # Primary calculation method
+        if primary_type == "pivot":
+            # Use pivot point method
+            lookback_candles = sl_config.get("pivot_settings", {}).get("lookback_candles", 30)
+            logger.debug(f"Using pivot method with lookback_candles={lookback_candles}")
+            
+            pivot_value = self._find_recent_pivot(df, lookback=lookback_candles, direction=direction)
+            
+            if pivot_value is not None:
+                stop_loss_price = pivot_value
+                # Validate pivot-based SL
+                if (direction == TradeDirection.LONG and stop_loss_price >= entry_price) or \
+                   (direction == TradeDirection.SHORT and stop_loss_price <= entry_price):
+                    logger.warning(f"Invalid pivot-based SL: direction={direction.value}, entry={entry_price}, SL={stop_loss_price}")
+                    stop_loss_price = None
+            else:
+                logger.warning(f"Failed to find valid pivot point for SL calculation")
+        
+        elif primary_type == "percentage":
+            # Use percentage method
+            percentage_value = sl_config.get("percentage_settings", {}).get("value", 0.02)
+            logger.debug(f"Using percentage method with value={percentage_value}")
+            
+            stop_loss_price = self._calculate_percentage_sl(entry_price, direction, percentage_value)
+        
+        else:
+            logger.warning(f"Unknown SL primary_type: {primary_type}")
+        
+        # Fallback if primary method failed
+        if stop_loss_price is None and sl_config.get("enable_fallback", True):
+            fallback_type = sl_config.get("fallback_type", "percentage")
+            logger.debug(f"Primary SL calculation failed, using fallback_type={fallback_type}")
+            
+            if fallback_type == "percentage":
+                percentage_value = sl_config.get("percentage_settings", {}).get("value", 0.02)
+                logger.debug(f"Using fallback percentage method with value={percentage_value}")
+                
+                stop_loss_price = self._calculate_percentage_sl(entry_price, direction, percentage_value)
+            else:
+                logger.warning(f"Unknown fallback_type: {fallback_type}")
+        
+        # Final validation
+        if stop_loss_price is not None:
+            if (direction == TradeDirection.LONG and stop_loss_price >= entry_price) or \
+               (direction == TradeDirection.SHORT and stop_loss_price <= entry_price):
+                logger.warning(f"Invalid final SL: direction={direction.value}, entry={entry_price}, SL={stop_loss_price}")
+                return None
+        
+        logger.debug(f"Final calculated SL: {stop_loss_price}")
+        return stop_loss_price
+        
+    def _calculate_take_profit(self, entry_price: float, stop_loss_price: float, direction: TradeDirection, tp_config: Dict[str, Any]) -> Optional[float]:
+        """
+        Calculate take profit price based on configuration.
+        
+        Args:
+            entry_price: Entry price of the trade
+            stop_loss_price: Calculated stop loss price
+            direction: Direction of the trade (LONG or SHORT)
+            tp_config: Configuration for take profit calculation
+            
+        Returns:
+            Calculated take profit price or None if calculation fails
+        """
+        primary_type = tp_config.get("primary_type", "rr_ratio")
+        logger.debug(f"Calculating take profit with primary_type={primary_type}, direction={direction.value}")
+        
+        take_profit_price = None
+        
+        if primary_type == "rr_ratio":
+            # Calculate TP based on risk-reward ratio
+            rr_ratio = tp_config.get("rr_ratio_settings", {}).get("value", 3.0)
+            logger.debug(f"Using risk-reward ratio method with value={rr_ratio}")
+            
+            # Calculate risk (distance from entry to stop loss)
+            if direction == TradeDirection.LONG:
+                risk = entry_price - stop_loss_price
+                if risk <= 0:
+                    logger.warning(f"Invalid risk for LONG: entry={entry_price}, SL={stop_loss_price}")
+                    return None
+                take_profit_price = entry_price + (risk * rr_ratio)
+            else:  # TradeDirection.SHORT
+                risk = stop_loss_price - entry_price
+                if risk <= 0:
+                    logger.warning(f"Invalid risk for SHORT: entry={entry_price}, SL={stop_loss_price}")
+                    return None
+                take_profit_price = entry_price - (risk * rr_ratio)
+        
+        elif primary_type == "fixed_percentage":
+            # Calculate TP based on fixed percentage from entry
+            percentage_value = tp_config.get("fixed_percentage_settings", {}).get("value", 0.06)
+            logger.debug(f"Using fixed percentage method with value={percentage_value}")
+            
+            if direction == TradeDirection.LONG:
+                take_profit_price = entry_price * (1 + percentage_value)
+            else:  # TradeDirection.SHORT
+                take_profit_price = entry_price * (1 - percentage_value)
+        
+        else:
+            logger.warning(f"Unknown TP primary_type: {primary_type}")
+        
+        # Final validation
+        if take_profit_price is not None:
+            if (direction == TradeDirection.LONG and take_profit_price <= entry_price) or \
+               (direction == TradeDirection.SHORT and take_profit_price >= entry_price):
+                logger.warning(f"Invalid TP: direction={direction.value}, entry={entry_price}, TP={take_profit_price}")
+                return None
+        
+        logger.debug(f"Final calculated TP: {take_profit_price}")
+        return take_profit_price
+
     async def check_signal(self, api_symbol: str, config_symbol: str) -> Optional[TradeSignal]:
         """Checks for a V1 SMA crossover signal for the given API symbol (e.g., BTCUSDT)."""
-        # DEBUG: Entry to check_signal
-        logger.debug(f"Entering check_signal for {api_symbol}, timestamp: {time.time()}")
-        
+        # 1. Get pair config with the new nested configurations
         pair_config = self._get_pair_specific_config(config_symbol)
-        if not pair_config: 
-            logger.debug(f"No configuration found for {config_symbol} in SignalEngineV1")
-            return None
+        logger.debug(f"Checking signal for {api_symbol} with config: {pair_config}")
 
-        # V1 strategy uses 1-minute timeframe for signals
-        signal_interval = "1m"
+        # 2. Fetch DataFrame from data_processor
+        signal_interval = "1m"  # V1 strategy uses 1-minute timeframe for signals
         df = self.data_processor.get_indicator_dataframe(api_symbol, signal_interval)
 
+        # Perform initial data checks
         if df is None or df.empty or len(df) < 2:
             logger.debug(f"Not enough data for {api_symbol} {signal_interval} to generate signal. df exists: {df is not None}, empty: {df.empty if df is not None else True}, len: {len(df) if df is not None else 0}")
             return None
@@ -101,8 +405,9 @@ class SignalEngineV1:
         sma_short_col = "sma_short"
         sma_long_col = "sma_long"
 
+        # Check if required columns exist and are not NaN
         if not all(col in latest.index and col in previous.index for col in [sma_short_col, sma_long_col, "close", "is_closed"]):
-            logger.debug(f"SMA data not available for {api_symbol} {signal_interval}. Columns in latest: {list(latest.index)}")
+            logger.debug(f"Required columns not available for {api_symbol} {signal_interval}.")
             return None
         
         # Ensure latest candle data is present and SMAs are calculated
@@ -111,180 +416,122 @@ class SignalEngineV1:
             logger.debug(f"SMA values are NA for {api_symbol} {signal_interval}. Latest: {latest[sma_short_col]}, {latest[sma_long_col]}. Previous: {previous[sma_short_col]}, {previous[sma_long_col]}")
             return None
 
-        # DEBUG: Log SMA values for debugging
+        # 3. Core SMA Crossover detection
         logger.debug(f"SMA values for {api_symbol}: Latest short={latest[sma_short_col]}, long={latest[sma_long_col]}. Previous short={previous[sma_short_col]}, long={previous[sma_long_col]}")
-
-        # --- Significance Filter (Time-based) ---
-        min_interval_seconds = pair_config["min_signal_interval_minutes"] * 60
-        current_time = time.time()
-        if api_symbol in self.last_signal_time and (current_time - self.last_signal_time[api_symbol]) < min_interval_seconds:
-            logger.debug(f"Signal for {api_symbol} too soon. Last signal at {self.last_signal_time[api_symbol]}, current: {current_time}, min_interval: {min_interval_seconds}")
-            return None
-
-        # --- SMA Crossover Detection ---
-        # Ensure we are checking on a closed candle or a very recent candle
-        # The signal is based on the state at the close of the \"previous\" candle that caused the crossover, 
-        # and the \"latest\" candle confirms it.
-        # Let\"s assume the signal is valid if the crossover happened on the \"latest\" candle compared to \"previous\".
         
         crossed_up = (previous[sma_short_col] <= previous[sma_long_col] and
                       latest[sma_short_col] > latest[sma_long_col])
         crossed_down = (previous[sma_short_col] >= previous[sma_long_col] and
                         latest[sma_short_col] < latest[sma_long_col])
 
-        # DEBUG: Log crossover detection
         logger.debug(f"Crossover detection for {api_symbol}: crossed_up={crossed_up}, crossed_down={crossed_down}")
 
         signal_direction: Optional[TradeDirection] = None
         if crossed_up:
             signal_direction = TradeDirection.LONG
-            logger.debug(f"LONG signal detected for {api_symbol}")
+            logger.debug(f"Detected LONG signal for {api_symbol}: Short SMA crossed above Long SMA")
         elif crossed_down:
             signal_direction = TradeDirection.SHORT
-            logger.debug(f"SHORT signal detected for {api_symbol}")
+            logger.debug(f"Detected SHORT signal for {api_symbol}: Short SMA crossed below Long SMA")
         else:
             logger.debug(f"No crossover detected for {api_symbol}")
-            return None # No crossover
+            return None  # No crossover
 
-        # TEMPORARY DEBUG CODE: Bypass SL/TP calculation for testing crossovers
-        if signal_direction:
-            logger.info(f"TEMP DEBUG: Crossover ({signal_direction.value}) detected for {api_symbol} at entry {latest['close']}.")
-            logger.info(f"TEMP DEBUG: Prev SMAs: S={previous[sma_short_col]}, L={previous[sma_long_col]}. Curr SMAs: S={latest[sma_short_col]}, L={latest[sma_long_col]}")
-            
-            # Construct a minimal Kline for the signal
-            temp_kline = Kline(
-                timestamp=int(latest.name),
-                open=latest["open"],
-                high=latest["high"],
-                low=latest["low"],
-                close=latest["close"],
-                volume=latest["volume"],
-                is_closed=latest["is_closed"],
-                symbol=api_symbol,
-                interval=signal_interval
-            )
-            
-            # Use dummy SL/TP values based on direction
-            dummy_sl = latest["close"] * (0.99 if signal_direction == TradeDirection.LONG else 1.01)  # 1% away
-            dummy_tp = latest["close"] * (1.01 if signal_direction == TradeDirection.LONG else 0.99)  # 1% away
-            
-            return TradeSignal(
-                symbol=api_symbol,
-                config_symbol=config_symbol,
-                contract_type=pair_config["contract_type"],
-                direction=signal_direction,
-                entry_price=latest["close"],
-                stop_loss_price=dummy_sl,
-                take_profit_price=dummy_tp,
-                strategy_name="V1_SMA_Crossover",
-                signal_kline=temp_kline,
-                details={
-                    "temp_debug": True,
-                    "sma_short_at_signal": latest[sma_short_col],
-                    "sma_long_at_signal": latest[sma_long_col],
-                    "sma_short_previous": previous[sma_short_col],
-                    "sma_long_previous": previous[sma_long_col]
-                }
-            )
-        
-        # Original SL/TP calculation
-        entry_price = latest["close"] # Current close price as entry
-        logger.debug(f"Entry price for {api_symbol}: {entry_price}")
-        
-        stop_loss_price: Optional[float] = None
-        take_profit_price: Optional[float] = None
-        tp_sl_ratio = pair_config["tp_sl_ratio"]
-        fallback_sl_percentage = pair_config["fallback_sl_percentage"]  # Get fallback SL percentage
-
-        # Standard pivot lookback for production use
-        pivot_lookback = 30
-        logger.debug(f"Using standard pivot_lookback={pivot_lookback}")
-
-        if signal_direction == TradeDirection.LONG:
-            pivot_low = self._find_recent_pivot(df, lookback=pivot_lookback, direction=TradeDirection.LONG)
-            logger.debug(f"LONG signal - find_recent_pivot result for {api_symbol}: pivot_low={pivot_low}")
-            
-            if pivot_low is not None:
-                # Add a small buffer to SL, e.g., a few ticks or a percentage
-                # For simplicity, direct use for now. Buffer can be added from config.
-                stop_loss_price = pivot_low 
-                risk = entry_price - stop_loss_price
-                logger.debug(f"Calculated risk for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}")
-                
-                if risk <= 0: # Invalid SL (e.g. pivot_low >= entry_price)
-                    logger.warning(f"Invalid SL for LONG {api_symbol}: entry={entry_price}, pivot_low={pivot_low}, risk={risk}. Using fallback SL.")
-                    # Use fallback SL instead of skipping the signal
-                    stop_loss_price = entry_price * (1 - fallback_sl_percentage)
-                    risk = entry_price - stop_loss_price
-                    logger.warning(f"Using fallback %-based SL for LONG {api_symbol}. New SL: {stop_loss_price}, risk: {risk}")
-                take_profit_price = entry_price + (risk * tp_sl_ratio)
-                logger.debug(f"Calculated TP for LONG {api_symbol}: TP={take_profit_price} (risk={risk} * ratio={tp_sl_ratio})")
-            else:
-                logger.warning(f"Could not determine pivot low for LONG SL for {api_symbol}. Using fallback SL.")
-                # Implement fallback SL calculation
-                stop_loss_price = entry_price * (1 - fallback_sl_percentage)
-                risk = entry_price - stop_loss_price
-                take_profit_price = entry_price + (risk * tp_sl_ratio)
-                logger.warning(f"Using fallback %-based SL for LONG {api_symbol}. SL: {stop_loss_price}, TP: {take_profit_price}")
-        else: # TradeDirection.SHORT
-            pivot_high = self._find_recent_pivot(df, lookback=pivot_lookback, direction=TradeDirection.SHORT)
-            logger.debug(f"SHORT signal - find_recent_pivot result for {api_symbol}: pivot_high={pivot_high}")
-            
-            if pivot_high is not None:
-                stop_loss_price = pivot_high
-                risk = stop_loss_price - entry_price
-                logger.debug(f"Calculated risk for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}")
-                
-                if risk <= 0: # Invalid SL (e.g. pivot_high <= entry_price)
-                    logger.warning(f"Invalid SL for SHORT {api_symbol}: entry={entry_price}, pivot_high={pivot_high}, risk={risk}. Using fallback SL.")
-                    # Use fallback SL instead of skipping the signal
-                    stop_loss_price = entry_price * (1 + fallback_sl_percentage)
-                    risk = stop_loss_price - entry_price
-                    logger.warning(f"Using fallback %-based SL for SHORT {api_symbol}. New SL: {stop_loss_price}, risk: {risk}")
-                take_profit_price = entry_price - (risk * tp_sl_ratio)
-                logger.debug(f"Calculated TP for SHORT {api_symbol}: TP={take_profit_price} (risk={risk} * ratio={tp_sl_ratio})")
-            else:
-                logger.warning(f"Could not determine pivot high for SHORT SL for {api_symbol}. Using fallback SL.")
-                # Implement fallback SL calculation
-                stop_loss_price = entry_price * (1 + fallback_sl_percentage)
-                risk = stop_loss_price - entry_price
-                take_profit_price = entry_price - (risk * tp_sl_ratio)
-                logger.warning(f"Using fallback %-based SL for SHORT {api_symbol}. SL: {stop_loss_price}, TP: {take_profit_price}")
-
-        if stop_loss_price is None or take_profit_price is None:
-            logger.warning(f"Failed to calculate SL/TP for {api_symbol}. Skipping signal.")
+        # 4. Min signal interval check
+        min_interval_seconds = pair_config["min_signal_interval_minutes"] * 60
+        current_time = time.time()
+        if api_symbol in self.last_signal_time and (current_time - self.last_signal_time[api_symbol]) < min_interval_seconds:
+            logger.debug(f"Signal for {api_symbol} too soon. Last signal at {self.last_signal_time[api_symbol]}, current: {current_time}, min_interval: {min_interval_seconds}")
             return None
+
+        # 5. Buffer Time Filter
+        buffer_time_config = pair_config["filters"]["buffer_time"]
+        if buffer_time_config["enabled"]:
+            if not self._passes_buffer_time_filter(df, buffer_time_config, signal_direction):
+                logger.info(f"Buffer time filter failed for {api_symbol} {signal_direction.value}")
+                return None
+            logger.debug(f"Buffer time filter passed for {api_symbol} {signal_direction.value}")
+
+        # 6. Volume Filter (stub)
+        volume_config = pair_config["filters"]["volume"]
+        if volume_config["enabled"]:
+            logger.info(f"Volume filter enabled for {api_symbol} but not yet implemented. Passing.")
+            # TODO: Implement volume filter logic
+            # if not self._passes_volume_filter(df, volume_config):
+            #     logger.info(f"Volume filter failed for {api_symbol}")
+            #     return None
+
+        # 7. Volatility Filter (stub)
+        volatility_config = pair_config["filters"]["volatility"]
+        if volatility_config["enabled"]:
+            logger.info(f"Volatility filter enabled for {api_symbol} but not yet implemented. Passing.")
+            # TODO: Implement volatility filter logic
+            # if not self._passes_volatility_filter(df, volatility_config):
+            #     logger.info(f"Volatility filter failed for {api_symbol}")
+            #     return None
+
+        # 8. Entry price
+        entry_price = latest["close"]
+        logger.debug(f"Entry price for {api_symbol}: {entry_price}")
+
+        # 9. SL Calculation
+        stop_loss_price = self._calculate_stop_loss(
+            entry_price=entry_price,
+            direction=signal_direction,
+            df=df,
+            sl_config=pair_config["sl_options"]
+        )
         
-        # Final validation of calculated SL/TP values
+        if stop_loss_price is None:
+            logger.warning(f"Failed to calculate valid stop loss for {api_symbol}. Skipping signal.")
+            return None
+
+        # 10. TP Calculation
+        take_profit_price = self._calculate_take_profit(
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            direction=signal_direction,
+            tp_config=pair_config["tp_options"]
+        )
+        
+        if take_profit_price is None:
+            logger.warning(f"Failed to calculate valid take profit for {api_symbol}. Skipping signal.")
+            return None
+
+        # 11. Final SL/TP Validation
         if (signal_direction == TradeDirection.LONG and (stop_loss_price >= entry_price or take_profit_price <= entry_price)) or \
            (signal_direction == TradeDirection.SHORT and (stop_loss_price <= entry_price or take_profit_price >= entry_price)):
             logger.warning(f"Calculated SL/TP invalid for {api_symbol}: Direction={signal_direction.value}, Entry={entry_price}, SL={stop_loss_price}, TP={take_profit_price}. Skipping signal.")
             return None
 
-        # Ensure we haven't issued a signal for this symbol recently
-        current_time = int(time.time())
-        min_interval_seconds = pair_config["min_signal_interval_minutes"] * 60
-        if api_symbol in self.last_signal_time and (current_time - self.last_signal_time[api_symbol]) < min_interval_seconds:
-            logger.debug(f"Signal for {api_symbol} too soon. Last signal: {self.last_signal_time[api_symbol]}, current: {current_time}")
-            return None
-
+        # Final validation passed, update last signal time
         self.last_signal_time[api_symbol] = current_time
         logger.info(f"Generated signal for {api_symbol}: {signal_direction.value} at {entry_price}, SL={stop_loss_price}, TP={take_profit_price}")
 
         # Construct signal kline from the latest data point in the DataFrame
         signal_kline_data = latest.to_dict()
-        # Ensure all fields required by Kline model are present, add defaults if necessary
         signal_kline_obj = Kline(
-            timestamp=int(latest.name), # timestamp is the index
+            timestamp=int(latest.name),  # timestamp is the index
             open=signal_kline_data.get("open"),
             high=signal_kline_data.get("high"),
             low=signal_kline_data.get("low"),
             close=signal_kline_data.get("close"),
             volume=signal_kline_data.get("volume"),
-            is_closed=signal_kline_data.get("is_closed", True), # Assume closed if it triggered signal logic
+            is_closed=signal_kline_data.get("is_closed", True),
             symbol=api_symbol,
             interval=signal_interval
         )
+
+        # Include filter and SL/TP details in signal
+        sl_method = pair_config["sl_options"]["primary_type"]
+        tp_method = pair_config["tp_options"]["primary_type"]
+        
+        # Determine which pivot was used for SL if applicable
+        pivot_used = None
+        if sl_method == "pivot":
+            pivot_used = self._find_recent_pivot(df, 
+                                               lookback=pair_config["sl_options"]["pivot_settings"]["lookback_candles"], 
+                                               direction=signal_direction)
 
         logger.debug(f"Successfully created TradeSignal for {api_symbol}: {signal_direction.value} at {entry_price}")
         return TradeSignal(
@@ -302,7 +549,12 @@ class SignalEngineV1:
                 "sma_long_at_signal": latest[sma_long_col],
                 "sma_short_previous": previous[sma_short_col],
                 "sma_long_previous": previous[sma_long_col],
-                "pivot_used_for_sl": pivot_low if signal_direction == TradeDirection.LONG else pivot_high
+                "pivot_used_for_sl": pivot_used,
+                "sl_method": sl_method,
+                "tp_method": tp_method,
+                "buffer_time_filter_enabled": buffer_time_config["enabled"],
+                "volume_filter_enabled": volume_config["enabled"],
+                "volatility_filter_enabled": volatility_config["enabled"]
             }
         )
 
