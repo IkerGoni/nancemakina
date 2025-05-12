@@ -1,13 +1,14 @@
 import pytest
 import asyncio
 import pandas as pd
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 import os
 import yaml
 
 # Ensure src is in path for tests if running pytest from root
 import sys
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 	../../	)))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 from src.config_loader import ConfigManager
 from src.connectors import BinanceRESTClient, BinanceWebSocketConnector, convert_symbol_to_api_format
@@ -63,12 +64,12 @@ def temp_config_file_for_integration(tmp_path):
 
 @pytest.fixture
 def integration_config_manager(temp_config_file_for_integration):
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None # Reset singleton
     with patch("src.config_loader.DEFAULT_CONFIG_PATH", temp_config_file_for_integration):
         cm = ConfigManager(auto_reload=False)
         yield cm
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
 
 @pytest.fixture
@@ -187,7 +188,7 @@ async def test_full_bot_cycle_with_mock_dependencies(temp_config_file_for_integr
     """ Test a simplified main loop cycle using the TradingBot class with mocks """
     
     # Patch ConfigManager to use the temp file for the entire TradingBot instance
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None
     
     with patch("src.config_loader.DEFAULT_CONFIG_PATH", temp_config_file_for_integration):
@@ -201,7 +202,7 @@ async def test_full_bot_cycle_with_mock_dependencies(temp_config_file_for_integr
                 "limits": {"cost": {"min": "5.0"}}
             }
         }
-        mock_rest.create_order.side_effect = lambda symbol, type, side, amount, price=None, params={}:
+        mock_rest.create_order.side_effect = lambda symbol, type, side, amount, price=None, params={}: \
             {
                 "id": f"mock_order_{int(time.time()*1000)}", "symbol": symbol, "status": "NEW",
                 "avgPrice": str(price or params.get("stopPrice") or 100.0), "filled": amount
@@ -247,7 +248,7 @@ async def test_full_bot_cycle_with_mock_dependencies(temp_config_file_for_integr
 
             # Test config hot reload effect on main app (e.g., active pairs)
             assert config_symbol in bot.active_trading_pairs
-            new_config_content = yaml.safe_load(open(temp_config_file_for_integration, 	r	).read())
+            new_config_content = yaml.safe_load(open(temp_config_file_for_integration, "r").read())
             new_config_content["pairs"]["TEST_USDT"]["enabled"] = False
             new_config_content["pairs"]["NEW_PAIR_USDT"] = {"enabled": True, "contract_type": "USDT_M"}
             with open(temp_config_file_for_integration, "w") as f:
@@ -262,6 +263,6 @@ async def test_full_bot_cycle_with_mock_dependencies(temp_config_file_for_integr
             mock_ws.stop.assert_called_once()
             mock_rest.close_exchange.assert_called_once()
 
-    if hasattr(ConfigManager, 	_instance	):
+    if hasattr(ConfigManager, "_instance"):
         ConfigManager._instance = None # Cleanup singleton
 

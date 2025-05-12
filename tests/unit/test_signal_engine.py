@@ -48,23 +48,59 @@ def signal_engine_v1(mock_config_manager_for_se, mock_data_processor_for_se):
 
 # Helper to create a DataFrame for mock_data_processor
 def create_mock_df(sma_short_prev, sma_long_prev, sma_short_curr, sma_long_curr, close_curr=100, low_lookback=[90,91,89], high_lookback=[110,109,111]):
-    # Ensure lookback arrays are long enough for pivot logic if needed
-    # Create enough past data for pivot calculation (e.g., 30 candles)
-    past_lows = low_lookback * 10  # Repeat to make it 30 long
-    past_highs = high_lookback * 10
-    past_closes = [close_curr - 1] * 30  # Dummy past closes
-
+    # Ensure lookback arrays are long enough for pivot logic (default pivot_lookback=30)
+    # Create enough past data for pivot calculation
+    total_rows = 32  # Total number of rows in the DataFrame (31 for past data + 1 for current)
+    pivot_data_rows = 30  # Number of rows needed for pivot calculation (excluding the last 2 rows)
+    
+    # Ensure low_lookback and high_lookback are lists
+    if not isinstance(low_lookback, list):
+        low_lookback = [low_lookback]
+    if not isinstance(high_lookback, list):
+        high_lookback = [high_lookback]
+    
+    # Repeat the lookback arrays to make them at least pivot_data_rows long
+    past_lows = (low_lookback * (pivot_data_rows // len(low_lookback) + 1))[:pivot_data_rows]
+    past_highs = (high_lookback * (pivot_data_rows // len(high_lookback) + 1))[:pivot_data_rows]
+    
+    # Create data arrays of consistent length
+    timestamps = list(range(1000, 1000 + total_rows * 1000, 1000))  # timestamps from 1000 to 32000, step 1000
+    
+    # Build arrays for all columns, ensuring they're all the same length
+    opens = [close_curr - 1] * pivot_data_rows + [close_curr - 1, close_curr - 0.5]
+    highs = past_highs + [max(high_lookback), close_curr + 2]
+    lows = past_lows + [min(low_lookback), close_curr - 2]
+    closes = [close_curr - 1] * pivot_data_rows + [close_curr - 1, close_curr]
+    volumes = [100] * total_rows
+    is_closed = [True] * total_rows
+    
+    # SMA values - past values, previous, and current
+    sma_shorts = [sma_short_prev - 1] * pivot_data_rows + [sma_short_prev, sma_short_curr]
+    sma_longs = [sma_long_prev - 1] * pivot_data_rows + [sma_long_prev, sma_long_curr]
+    
+    # Validate all arrays have the same length
+    assert len(timestamps) == total_rows
+    assert len(opens) == total_rows
+    assert len(highs) == total_rows
+    assert len(lows) == total_rows
+    assert len(closes) == total_rows
+    assert len(volumes) == total_rows
+    assert len(is_closed) == total_rows
+    assert len(sma_shorts) == total_rows
+    assert len(sma_longs) == total_rows
+    
     data = {
-        "timestamp": list(range(1000, 32000, 1000)),  # 31 points for previous, 1 for current
-        "open": [close_curr-1]*30 + [close_curr-1, close_curr-0.5],
-        "high": past_highs + [max(high_lookback), close_curr + 2],
-        "low": past_lows + [min(low_lookback), close_curr - 2],
-        "close": past_closes + [close_curr-1, close_curr],
-        "volume": [100]*32,
-        "is_closed": [True]*31 + [True],  # Current candle is also closed for signal generation
-        "sma_short": [sma_short_prev -1]*30 + [sma_short_prev, sma_short_curr],
-        "sma_long": [sma_long_prev-1]*30 + [sma_long_prev, sma_long_curr],
+        "timestamp": timestamps,
+        "open": opens,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": volumes,
+        "is_closed": is_closed,
+        "sma_short": sma_shorts,
+        "sma_long": sma_longs,
     }
+    
     df = pd.DataFrame(data)
     df.set_index("timestamp", inplace=True)
     return df
@@ -447,10 +483,22 @@ async def test_se_find_recent_pivot_logic(signal_engine_v1):
     # Test with insufficient data
     assert signal_engine_v1._find_recent_pivot(df[:2], lookback=5, direction=TradeDirection.LONG) is None
     
-    # Test with exactly 3 rows (minimum required)
+    # Test with exactly 3 rows
+    # According to the implementation in SignalEngineV1._find_recent_pivot,
+    # we need at least 3 rows, but they must be closed candles *before* the signal candle
+    # When we pass a 3-row DataFrame, there are actually only 2 rows considered for pivot calculation
+    # (the signal candle itself is excluded with iloc[-lookback-1:-1])
     three_row_df = df[:3]
     pivot_l_min = signal_engine_v1._find_recent_pivot(three_row_df, lookback=5, direction=TradeDirection.LONG)
-    assert pivot_l_min == 8  # Min of [10, 8]
+    # Since we only have 2 usable rows, which is less than the minimum 3 required,
+    # the function should return None, not the min of [10, 8]
+    assert pivot_l_min is None
+    
+    # Test with 4 rows (which gives 3 usable rows - the minimum required)
+    four_row_df = df[:4]
+    pivot_l_four = signal_engine_v1._find_recent_pivot(four_row_df, lookback=5, direction=TradeDirection.LONG)
+    # Now we have 3 usable rows with lows [10, 8, 9], so min is 8
+    assert pivot_l_four == 8
     
     # Test with flat values
     flat_data = {

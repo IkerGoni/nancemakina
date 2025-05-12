@@ -226,7 +226,7 @@ class OrderManager:
             return
         
         entry_order_id = entry_order_response["id"]
-        logger.info(f"Entry order placed for {api_symbol}. ID: {entry_order_id}, Status: {entry_order_response.get("status")}")
+        logger.info(f"Entry order placed for {api_symbol}. ID: {entry_order_id}, Status: {entry_order_response.get('status')}")
 
         # Wait for entry order to fill (or partial fill if handling that)
         # For MARKET orders, they usually fill quickly. Polling might be needed for LIMIT.
@@ -259,7 +259,7 @@ class OrderManager:
             logger.error(f"Failed to place SL order for {api_symbol}. Response: {sl_order_response}. Entry order {entry_order_id} might need manual SL.")
             # Potentially try to close the position if SL cannot be placed
         else:
-            logger.info(f"SL order placed for {api_symbol}. ID: {sl_order_response["id"]}")
+            logger.info(f"SL order placed for {api_symbol}. ID: {sl_order_response['id']}")
 
         tp_order_params = {"reduceOnly": "true"}
         logger.info(f"Placing TP order for {api_symbol}: {sl_tp_side.value} {quantity} units, stopPrice {adjusted_tp_price:.{self._get_price_precision(price_tick)}f}")
@@ -274,7 +274,7 @@ class OrderManager:
         if not tp_order_response or "id" not in tp_order_response:
             logger.error(f"Failed to place TP order for {api_symbol}. Response: {tp_order_response}. Entry order {entry_order_id} might need manual TP.")
         else:
-            logger.info(f"TP order placed for {api_symbol}. ID: {tp_order_response["id"]}")
+            logger.info(f"TP order placed for {api_symbol}. ID: {tp_order_response['id']}")
 
         # TODO: Notify PositionManager about the new position and associated orders
         # position_data = Position(
