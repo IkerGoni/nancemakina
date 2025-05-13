@@ -1,0 +1,81 @@
+# Binance Futures Trading Bot - Testnet Validation Configuration
+# This configuration is specifically designed for comprehensive testnet validation
+# of the V1 MVP with a realistic trading setup.
+
+# Dynamic Signal Engine Configuration
+engine_config:
+  module: "src.signal_engine"
+  class: "SignalEngineV1"
+
+api:
+  binance_api_key: "YOUR_TESTNET_API_KEY" # Enter your Binance Testnet API Key
+  binance_api_secret: "YOUR_TESTNET_API_SECRET" # Enter your Binance Testnet API Secret
+  testnet: true # Ensure testnet is enabled for validation
+
+global_settings:
+  # V1 Strategy Configuration (SMA Crossover)
+  v1_strategy:
+    # Core Strategy Parameters - Using standard values for validation
+    sma_short_period: 21 # Standard short period
+    sma_long_period: 50 # Shorter long period for more frequent signals during testing
+    min_signal_interval_minutes: 15 # Standard minimum interval
+    default_margin_usdt: 50.0 # Moderate test margin
+    default_leverage: 5 # Conservative leverage for testing
+    margin_mode: "ISOLATED" # Standard margin mode
+    indicator_timeframes: ["1m", "5m", "15m", "1h"] # Common timeframes
+    
+    # Signal Filters - Enabling specific filters for validation
+    filters:
+      # Buffer Time Filter - Enabled to reduce false signals
+      buffer_time:
+        enabled: true # Activated for validation
+        candles: 2 # Two candles to confirm crossover
+      
+      # Volume Filter - Enabled to validate volume-based filtering
+      volume:
+        enabled: true # Activated for validation
+        lookback_periods: 20 # Standard lookback
+        min_volume_ratio: 1.2 # Moderate threshold (1.2x average)
+      
+      # Volatility Filter - Disabled initially to focus on other filters
+      volatility:
+        enabled: false
+        indicator: "atr"
+        lookback_periods: 14
+        min_threshold: 0.002
+        max_threshold: 0.05
+    
+    # Stop Loss configuration
+    sl_options:
+      primary_type: "pivot" # Using pivot-based stop loss as primary
+      pivot_settings:
+        lookback_candles: 30 # Standard lookback period
+      enable_fallback: true # Ensure fallback is enabled
+      fallback_type: "percentage" # Use percentage-based fallback
+      percentage_settings:
+        value: 0.02 # 2% fallback stop loss
+    
+    # Take Profit configuration
+    tp_options:
+      primary_type: "rr_ratio" # Using risk-reward ratio for take profit
+      rr_ratio_settings:
+        value: 2.0 # 2:1 reward-to-risk ratio (moderate)
+
+pairs:
+  # Primary test pair
+  BTC_USDT:
+    enabled: true
+    leverage: 5
+    
+  # Secondary test pair
+  ETH_USDT:
+    enabled: true
+    leverage: 5
+
+logging:
+  # Use INFO level for standard operation, change to DEBUG if specific issues arise
+  level: "INFO"
+  log_file: "logs/testnet_validation.log" # Separate log file for this validation run
+
+monitoring:
+  prometheus_port: 8000 

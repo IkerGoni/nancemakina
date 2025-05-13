@@ -1,0 +1,156 @@
+# Binance Futures Trading Bot - Example Configuration
+# Copy this file to config.yaml and edit with your settings.
+
+api:
+  binance_api_key: "0600d61e1d558badc8ca6b7c97ba5dce77d83961122da094f00a555141d54c46
+" # Replace with your Testnet API Key
+  binance_api_secret: "5b79707df9e8925c613d3696a6c0740b05a72e5982313052a42ec3235f2ed03e
+" # Replace with your Testnet API Secret
+  testnet: true # Enable Testnet mode
+  # For COIN-M, if different keys are needed, this structure might need adjustment or separate sections.
+  # For now, assuming same keys for USD-M and COIN-M or that ccxt handles it.
+
+
+global_settings:
+  v1_strategy:
+    # Core strategy parameters
+    sma_short_period: 21           # Period for the shorter SMA
+    sma_long_period: 200           # Period for the longer SMA
+    min_signal_interval_minutes: 15 # Minimum time between signals for the same pair
+    
+    # Default leverage and margin settings
+    default_leverage: 10
+    margin_mode: "ISOLATED"        # "ISOLATED" or "CROSSED"
+    default_margin_usdt: 50.0      # For USDT-M pairs, default margin per trade
+    default_margin_coin: 0.01      # For COIN-M pairs, default margin in base coin (interpret as needed for sizing)
+
+    # Timeframes for DataProcessor to calculate indicators on (V1 strategy primarily uses '1m' for signals)
+    indicator_timeframes: ["1m", "5m", "15m", "1h", "4h"]
+
+    # --- Filters Configuration ---
+    filters:
+      # Buffer Time Filter: Ensures crossover condition persists
+      buffer_time:
+        enabled: false
+        candles: 3                 # Number of candles the crossover must persist after initial detection
+
+      # Volume Filter: Checks if current volume meets criteria against average volume
+      volume:
+        enabled: false
+        average_period: 50         # Period for calculating rolling average volume
+        threshold_ratio: 1.5       # Current volume must be >= (avg_volume * threshold_ratio)
+      
+      # Volatility Filter (ATR-based): Checks if market volatility is within desired range
+      volatility:
+        enabled: false
+        atr_period: 14             # Period for ATR calculation
+        # condition_type options:
+        # "min_atr_percentage_of_price": ATR must be >= X% of current price
+        # "max_atr_percentage_of_price": ATR must be <= X% of current price
+        # "min_atr_absolute_value": ATR must be >= X (absolute value)
+        condition_type: "min_atr_percentage_of_price"
+        value: 0.2                 # Threshold value (e.g., 0.2 for 0.2% or an absolute ATR value)
+
+    # --- Stop-Loss (SL) Configuration Options ---
+    sl_options:
+      # Primary method for calculating Stop Loss
+      primary_type: "pivot"        # Options: "pivot", "percentage", "atr"
+      
+      pivot_settings:              # Settings if primary_type is "pivot"
+        lookback_candles: 30       # Lookback period for finding pivot points
+      
+      percentage_settings:         # Settings if primary_type or fallback_type is "percentage"
+        value: 0.02                # SL as a percentage of entry price (e.g., 0.02 for 2%)
+      
+      atr_settings:                # Settings if primary_type or fallback_type is "atr"
+        atr_period: 14             # Period for ATR calculation (can be same as volatility.atr_period or different)
+        multiplier: 2.0            # ATR multiplier (e.g., SL = entry - ATR * multiplier for LONG)
+      
+      # Fallback SL mechanism if primary SL calculation fails (e.g., pivot not found)
+      enable_fallback: true
+      fallback_type: "percentage"  # Options: "percentage", "atr"
+
+    # --- Take-Profit (TP) Configuration Options ---
+    tp_options:
+      # Primary method for calculating Take Profit
+      primary_type: "rr_ratio"     # Options: "rr_ratio", "atr_multiple", "fixed_percentage"
+      
+      rr_ratio_settings:           # Settings if primary_type is "rr_ratio"
+        # value: 3.0               # Take Profit = Risk * value. Risk is (entry - SL).
+                                   # This is the classic tp_sl_ratio. If present, will be used.
+                                   # If not present here, the top-level 'tp_sl_ratio' (if it exists) can be used as a fallback.
+                                   # For clarity, explicitly define it here.
+        value: 3.0                 # Example: 2.0 R:R
+      
+      atr_multiple_settings:       # Settings if primary_type is "atr_multiple"
+        atr_period: 14             # Period for ATR calculation
+        multiplier_from_entry: 3.0 # TP = entry + ATR * multiplier for LONG
+      
+      fixed_percentage_settings:   # Settings if primary_type is "fixed_percentage"
+        value: 0.04                # TP as a percentage from entry price (e.g., 0.04 for 4%)
+    
+    # Note: The original 'tp_sl_ratio' at the global v1_strategy level can be kept for backward
+    # compatibility if 'tp_options.primary_type' is 'rr_ratio' and 'rr_ratio_settings.value' is not set.
+    # However, it's cleaner to define it within tp_options. For now, keeping it for reference.
+    tp_sl_ratio: 2.0 # This is the classic R:R ratio, primarily used if tp_options.primary_type == "rr_ratio"
+
+# --- Pair-Specific Overrides ---
+# You can override any of the global_settings.v1_strategy parameters here for individual pairs.
+pairs:
+  BTC_USDT:
+    enabled: true
+    contract_type: "USDT_M" # Or "COIN_M"
+    # leverage: 20             # Example: Override global leverage
+    # margin_usdt: 100.0       # Example: Override global margin for this USDT-M pair
+    # filters:                 # Example: Override filter settings for BTC_USDT
+    #   buffer_time:
+    #     enabled: true
+    #     candles: 2
+    #   volume:
+    #     enabled: true
+    #     threshold_ratio: 2.0
+    # sl_options:              # Example: Override SL settings for BTC_USDT
+    #   primary_type: "percentage"
+    #   percentage_settings:
+    #     value: 0.015         # 1.5% SL
+    #   enable_fallback: true
+    #   fallback_type: "atr"
+    #   atr_settings:            # ATR settings for fallback SL if primary is percentage but we want ATR fallback
+    #     atr_period: 10
+    #     multiplier: 1.5
+    # tp_options:              # Example: Override TP settings for BTC_USDT
+    #   primary_type: "fixed_percentage"
+    #   fixed_percentage_settings:
+    #     value: 0.03          # 3% TP
+
+  ETH_USDT:
+    enabled: true
+    contract_type: "USDT_M"
+    # Uses global settings by default
+
+  BTCUSD_PERP: # Example for a COIN-M contract
+    enabled: false
+    contract_type: "COIN_M"
+    # margin_coin: 0.002       # e.g., 0.002 BTC for this contract
+    # leverage: 5
+
+# --- Logging Configuration ---
+logging:
+  level: "INFO"                # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # file: "logs/bot.log"       # Optional: Path to a log file. If omitted, logs to console.
+  # rotation_size_mb: 10       # Optional: Max size in MB before log file rotates.
+  # rotation_backup_count: 5   # Optional: Number of backup log files to keep.
+
+# --- Monitoring Configuration ---
+monitoring:
+  prometheus_port: 8000        # Port for the Prometheus metrics HTTP server
+  # enabled: true              # Optional: Set to false to disable. Defaults to true if section exists.
+
+# --- Backtesting Configuration ---
+backtesting:
+  initial_balance_usdt: 10000
+  fee_percent: 0.04            # Taker fee (e.g., 0.04% becomes 0.0004)
+  slippage_percent: 0.01       # Slippage per side of the trade (e.g., 0.01% becomes 0.0001)
+  # data_file: "path/to/your/historical_data.csv" # Path to historical data for backtesting script
+  # start_date: "2023-01-01T00:00:00Z" # Optional: For filtering data if your CSV contains more
+  # end_date: "2023-12-31T23:59:59Z"   # Optional

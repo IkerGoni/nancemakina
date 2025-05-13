@@ -5,6 +5,7 @@ A robust, configurable trading bot for Binance Futures markets (USDT-M and COIN-
 ## Features
 
 - **Multi-Market Support**: Trade on both USDT-M and COIN-M Binance Futures markets
+- **Dynamic Signal Engine Loading**: Configurable engine selection for different trading strategies
 - **Advanced SMA Crossover Strategy**: Configurable moving averages with multiple validation filters:
   - Buffer Time Filter: Requires consecutive candles to confirm crossover
   - Volume Filter: Validates signals based on higher-than-average volume
@@ -62,7 +63,7 @@ The bot is configured through the `config/config.yaml` file. Configuration inclu
 - Risk management settings
 - Logging and monitoring
 
-See the comprehensive [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for detailed options and examples.
+See the comprehensive [Configuration Guide](docs/CONFIGURATION_GUIDE.md) for detailed options and examples, including instructions for dynamic signal engine selection, advanced filter configuration, and all available stop loss and take profit methods.
 
 For quick testing on Testnet, start with:
 
@@ -116,6 +117,12 @@ Run the bot with:
 
 ```bash
 python -m src.main
+```
+
+To use a specific configuration file:
+
+```bash
+python -m src.main --config path/to/your/config.yaml
 ```
 
 ### Development Mode

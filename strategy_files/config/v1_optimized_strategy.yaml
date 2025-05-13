@@ -1,0 +1,91 @@
+# Binance Futures Trading Bot - Optimized V1 Strategy Configuration
+# This configuration is based on "Test 12B" backtest findings 
+# It includes the crucial Trend Filter (price relative to long SMA)
+
+# Dynamic Signal Engine Configuration
+engine_config:
+  module: "src.signal_engine"  # Python module where the signal engine class is defined
+  class: "SignalEngineV1"  # Signal engine class to use
+
+api:
+  binance_api_key: "YOUR_API_KEY_PLACEHOLDER"  # Your Binance API Key
+  binance_api_secret: "YOUR_API_SECRET_PLACEHOLDER"  # Your Binance API Secret
+  testnet: true  # Set to false for live trading
+
+global_settings:
+  # V1 Strategy Configuration (SMA Crossover)
+  v1_strategy:
+    # Core Strategy Parameters from Test 12B
+    sma_short_period: 21  # Short SMA period
+    sma_long_period: 200  # Long SMA period
+    min_signal_interval_minutes: 10  # Minimum time between signals (from Test 12B)
+    default_margin_usdt: 50.0  # Default margin per trade
+    default_leverage: 10  # Default leverage
+    margin_mode: "ISOLATED"  # Margin mode: "ISOLATED" or "CROSSED"
+    indicator_timeframes: ["1m"]  # Only 1m is needed for Test 12B strategy
+    
+    # Signal Filters - Test 12B optimized settings
+    filters:
+      # Buffer Time Filter
+      buffer_time:
+        enabled: false  # Not used in Test 12B
+        candles: 2
+      
+      # Volume Filter
+      volume:
+        enabled: false  # Not used in Test 12B
+        lookback_periods: 20
+        min_volume_ratio: 1.5
+      
+      # Volatility Filter
+      volatility:
+        enabled: false  # Not used in Test 12B
+        indicator: "atr"
+        lookback_periods: 14
+        min_threshold: 0.002
+        max_threshold: 0.05
+      
+      # Trend Filter - CRUCIAL for Test 12B performance
+      trend:
+        enabled: true  # Key filter from Test 12B
+        sma_period: 200  # Uses the same SMA as the long SMA for crossover
+    
+    # Stop Loss configuration from Test 12B
+    sl_options:
+      primary_type: "pivot"  # Primary SL method from Test 12B
+      pivot_settings:
+        lookback_candles: 40  # Test 12B parameter
+      enable_fallback: true  # Use fallback if pivot not found
+      fallback_type: "atr"  # Test 12B parameter
+      atr_settings:        
+        lookback_periods: 14     # Test 12B parameter
+        multiplier: 2.1    # Test 12B parameter
+      percentage_settings:  # Fallback for the fallback
+        value: 0.02
+    
+    # Take Profit configuration from Test 12B
+    tp_options:
+      primary_type: "rr_ratio"  # Test 12B parameter
+      rr_ratio_settings:
+        value: 2.25  # Test 12B parameter (R:R = 2.25)
+      fixed_percentage_settings:
+        value: 0.06  # Default, not used in Test 12B
+
+pairs:
+  # Example trading pair - Test 12B likely used BTC_USDT
+  BTC_USDT:
+    enabled: true
+    contract_type: "USDT_M"
+
+  # Add more pairs as needed, the global strategy will apply
+
+logging:
+  level: "DEBUG"  # Using DEBUG for more detailed logs during testing
+
+monitoring:
+  prometheus_port: 8000
+
+backtesting:  # Configuration matching Test 12B setup
+  initial_balance_usdt: 1000.0  # Starting balance for backtests
+  fee_percent: 0.02  # 0.02% trading fee
+  slippage_percent: 0.0  # No slippage in Test 12B 

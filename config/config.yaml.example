@@ -1,6 +1,11 @@
 # Binance Futures Trading Bot - Example Configuration
 # Copy this file to config.yaml and edit with your settings.
 
+# Dynamic Signal Engine Configuration
+engine_config:
+  module: "src.signal_engine"  # Python module where the signal engine class is defined
+  class: "SignalEngineV1"  # Signal engine class to use
+
 api:
   binance_api_key: "YOUR_BINANCE_API_KEY" # Your Binance API Key (ensure only Futures trading is enabled)
   binance_api_secret: "YOUR_BINANCE_API_SECRET" # Your Binance API Secret
@@ -33,7 +38,7 @@ global_settings:
       volume:
         enabled: false # Set to true to activate volume filter
         lookback_periods: 20 # Number of candles to calculate average volume
-        min_threshold: 1.5 # Minimum volume as multiplier of average (e.g., 1.5x average)
+        min_volume_ratio: 1.5 # Minimum volume as multiplier of average (e.g., 1.5x average)
       
       # Volatility Filter - Requires adequate volatility for valid signals
       volatility:
@@ -42,6 +47,11 @@ global_settings:
         lookback_periods: 14 # Lookback period for ATR calculation
         min_threshold: 0.002 # Minimum volatility as percentage of price (0.2%)
         max_threshold: 0.05 # Maximum volatility as percentage of price (5%)
+      
+      # Trend Filter - Requires price to be in the appropriate trend direction
+      trend:
+        enabled: false # Default to false in the generic example
+        sma_period: 200 # SMA period for trend determination (should match long_sma for Test 12B)
     
     # Stop Loss configuration options
     sl_options:
@@ -111,7 +121,7 @@ pairs:
     #     candles: 3
     #   volume:
     #     enabled: true
-    #     min_threshold: 2.0
+    #     min_volume_ratio: 2.0
     
     # Pair-specific SL/TP overrides
     # sl_options:
