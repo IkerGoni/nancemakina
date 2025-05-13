@@ -2,10 +2,18 @@ import pandas as pd
 from collections import deque, defaultdict
 import logging
 from typing import Dict, Deque, Optional, List, Tuple, Callable
+import numpy as np
+import asyncio
+from datetime import datetime
+import sys
+sys.path.append('scripts')
 
 from src.models import Kline
 from src.config_loader import ConfigManager
 from src.connectors import convert_symbol_to_api_format # For consistent symbol usage
+
+# Import our new vectorized indicator processor
+from scripts.indicator_processor import VectorizedIndicatorProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +23,25 @@ logger = logging.getLogger(__name__)
 MAX_KLINE_BUFFER_LENGTH = 300 
 
 class DataProcessor:
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(self, config_manager: ConfigManager, max_buffer_length: int = 1000):
         self.config_manager = config_manager
-        # Structure: self.kline_buffers[api_symbol][interval] = deque([Kline, ...])
-        self.kline_buffers: Dict[str, Dict[str, Deque[Kline]]] = defaultdict(lambda: defaultdict(lambda: deque(maxlen=MAX_KLINE_BUFFER_LENGTH)))
-        # Structure: self.indicator_data[api_symbol][interval] = pd.DataFrame with columns [timestamp, open, high, low, close, volume, sma_short, sma_long]
-        self.indicator_data: Dict[str, Dict[str, pd.DataFrame]] = defaultdict(lambda: defaultdict(pd.DataFrame))
+        
+        # Initialize indicator processor
+        self.indicator_processor = VectorizedIndicatorProcessor()
+        
+        # Buffers to store incoming klines
+        self.kline_buffers: Dict[str, Dict[str, deque]] = {}
+        self.MAX_KLINE_BUFFER_LENGTH = max_buffer_length
+        
+        # Storage for indicator data
+        self.indicator_data: Dict[str, Dict[str, pd.DataFrame]] = {}
+        
+        # Track last processed timestamp for each symbol and interval
+        self.last_processed: Dict[str, Dict[str, int]] = {}
+        
+        # Buffer for parallel processing
+        self.pending_klines: Dict[str, Dict[str, List[Kline]]] = {}
+        self.batch_size = 20  # Process in batches for better performance
         
         self.config_manager.register_callback(self._handle_config_update) # Listen for config changes
         self._active_pairs_timeframes: Dict[str, List[str]] = {}
@@ -65,119 +86,163 @@ class DataProcessor:
             # logger.debug(f"Skipping kline for inactive pair/timeframe: {api_symbol} {interval}")
             return
 
-        # Add to deque. If it's an update to the last candle, replace it.
-        # Kline data from Binance WS usually gives the current (non-closed) candle and then the closed one.
-        # We are interested in closed candles for SMA calculation primarily.
+        # Initialize buffers if needed
+        if api_symbol not in self.kline_buffers:
+            self.kline_buffers[api_symbol] = {}
+            self.indicator_data[api_symbol] = {}
+            self.last_processed[api_symbol] = {}
+            self.pending_klines[api_symbol] = {}
+            
+        if interval not in self.kline_buffers[api_symbol]:
+            self.kline_buffers[api_symbol][interval] = deque(maxlen=self.MAX_KLINE_BUFFER_LENGTH)
+            self.indicator_data[api_symbol][interval] = pd.DataFrame()
+            self.last_processed[api_symbol][interval] = 0
+            self.pending_klines[api_symbol][interval] = []
+            
+        # Add kline to buffer
+        self.kline_buffers[api_symbol][interval].append(kline)
         
-        buffer = self.kline_buffers[api_symbol][interval]
-        if kline.is_closed:
-            if buffer and buffer[-1].timestamp == kline.timestamp:
-                if not buffer[-1].is_closed:
-                    buffer[-1] = kline # Replace the non-closed one with the closed one
-            else:
-                buffer.append(kline)
-            self._update_indicators(api_symbol, interval)
-        else: # Kline is not closed (current, ongoing candle)
-            if buffer and buffer[-1].timestamp == kline.timestamp:
-                buffer[-1] = kline # Update the last (current) candle
-            else:
-                buffer.append(kline) # Add as new current candle
+        # Add to pending klines for batch processing
+        self.pending_klines[api_symbol][interval].append(kline)
+        
+        # Process in batches for better performance
+        if len(self.pending_klines[api_symbol][interval]) >= self.batch_size or kline.is_closed:
+            await self._process_pending_klines(api_symbol, interval)
 
+    async def _process_pending_klines(self, api_symbol: str, interval: str):
+        """Process batches of klines for better performance"""
+        pending = self.pending_klines[api_symbol][interval]
+        if not pending:
+            return
+            
+        # Prepare data for updating indicators
+        for kline in pending:
+            self._update_dataframe(api_symbol, interval, kline)
+            
+        # Update last processed timestamp
+        self.last_processed[api_symbol][interval] = pending[-1].timestamp
+        
+        # Clear pending klines
+        self.pending_klines[api_symbol][interval] = []
+    
+    def _update_dataframe(self, api_symbol: str, interval: str, kline: Kline):
+        """Update dataframe with new kline data using optimized approach"""
+        df = self.indicator_data[api_symbol][interval]
+        
+        # Check if kline timestamp already exists in dataframe
+        timestamp_exists = False
+        if not df.empty and 'timestamp' in df.columns:
+            timestamp_exists = kline.timestamp in df['timestamp'].values
+            
+        if timestamp_exists:
+            # Update existing row
+            idx = df.index[df['timestamp'] == kline.timestamp][0]
+            df.at[idx, 'open'] = kline.open
+            df.at[idx, 'high'] = kline.high
+            df.at[idx, 'low'] = kline.low
+            df.at[idx, 'close'] = kline.close
+            df.at[idx, 'volume'] = kline.volume
+            df.at[idx, 'is_closed'] = kline.is_closed
+            
+            # Update indicators incrementally only if candle is closed
+            if kline.is_closed:
+                self.indicator_processor.update_indicators(df, idx)
+        else:
+            # Create new row
+            new_row = {
+                'timestamp': kline.timestamp,
+                'open': kline.open,
+                'high': kline.high,
+                'low': kline.low,
+                'close': kline.close,
+                'volume': kline.volume,
+                'is_closed': kline.is_closed
+            }
+            
+            # Add to dataframe
+            df_new_row = pd.DataFrame([new_row])
+            if df.empty:
+                self.indicator_data[api_symbol][interval] = df_new_row
+            else:
+                # Append and sort by timestamp
+                self.indicator_data[api_symbol][interval] = pd.concat([df, df_new_row], ignore_index=True)
+                self.indicator_data[api_symbol][interval] = self.indicator_data[api_symbol][interval].sort_values('timestamp').reset_index(drop=True)
+            
+            # If we have enough data and candle is closed, calculate indicators
+            if len(self.indicator_data[api_symbol][interval]) > 1 and kline.is_closed:
+                self._update_indicators_batch(api_symbol, interval)
+    
+    def _update_indicators_batch(self, api_symbol: str, interval: str):
+        """Update all indicators in a single batch operation for efficiency"""
+        df = self.indicator_data[api_symbol][interval]
+        
+        # Only process if we have data
+        if df.empty:
+            return
+            
+        # Check if we already have indicator columns
+        has_indicators = 'sma_short' in df.columns and 'sma_long' in df.columns
+        
+        # If we don't have indicators yet, do a full batch calculation
+        if not has_indicators:
+            self.indicator_data[api_symbol][interval] = self.indicator_processor.batch_process_indicators(df)
+        else:
+            # For existing data, process only the new row
+            latest_idx = len(df) - 1
+            self.indicator_processor.update_indicators(df, latest_idx)
+            
     def _update_indicators(self, api_symbol: str, interval: str):
+        """Legacy method for backward compatibility - delegates to batch processing"""
         kline_deque = self.kline_buffers[api_symbol][interval]
         if not kline_deque:
             return
-        
-        df_data = {
-            "timestamp": [k.timestamp for k in kline_deque],
-            "open": [k.open for k in kline_deque],
-            "high": [k.high for k in kline_deque],
-            "low": [k.low for k in kline_deque],
-            "close": [k.close for k in kline_deque],
-            "volume": [k.volume for k in kline_deque],
-            "is_closed": [k.is_closed for k in kline_deque]
-        }
-        df = pd.DataFrame(df_data)
-        df.set_index("timestamp", inplace=True, drop=False) # Keep timestamp column too
-        df.sort_index(inplace=True) # Ensure time order
-        df = df[~df.index.duplicated(keep="last")] # Remove duplicate timestamps, keep last update
-
+            
+        # Convert deque to DataFrame if needed
+        if api_symbol not in self.indicator_data or interval not in self.indicator_data[api_symbol]:
+            self.indicator_data[api_symbol][interval] = pd.DataFrame()
+            
+        # Check if we need to initialize the DataFrame
+        df = self.indicator_data[api_symbol][interval]
         if df.empty:
-            return
-
-        config = self.config_manager.get_config()
-        global_settings = config.get("global_settings", {})
-        v1_strategy_config = global_settings.get("v1_strategy", {})
-        sma_short_period = v1_strategy_config.get("sma_short_period", 21)
-        sma_long_period = v1_strategy_config.get("sma_long_period", 200)
-
-        # Get Volume & Volatility settings from global config
-        volume_config = v1_strategy_config.get("filters", {}).get("volume", {})
-        volatility_config = v1_strategy_config.get("filters", {}).get("volatility", {})
-        
-        # Retrieve periods for Average Volume and ATR from config
-        avg_vol_period = volume_config.get("lookback_periods", 20)
-        atr_period = volatility_config.get("lookback_periods", 14)
-        
-        logger.debug(f"Indicator periods from config - SMA short: {sma_short_period}, SMA long: {sma_long_period}, "
-                   f"Avg Volume: {avg_vol_period}, ATR: {atr_period}")
-        
-        # Calculate SMAs
-        # Special handling for SMA period 1
-        if sma_short_period == 1:
-            logger.debug("Using direct close prices for SMA_short period 1")
-            df["sma_short"] = df["close"]
-        elif len(df) >= sma_short_period:
-            df["sma_short"] = df["close"].rolling(window=sma_short_period).mean()
-        else:
-            df["sma_short"] = pd.NA
-
-        # Special handling for SMA period 2
-        if sma_long_period == 2 and len(df) >= 2:
-            logger.debug("Manual calculation for SMA_long period 2")
-            # Manual calculation for SMA(2) to ensure it's correct
-            # For the last row, it's (current close + previous close) / 2
-            last_two_closes = df["close"].tail(2).values
-            if len(last_two_closes) == 2:
-                last_sma2 = (last_two_closes[0] + last_two_closes[1]) / 2
-                logger.debug(f"Last two closes: {last_two_closes[0]}, {last_two_closes[1]}, SMA(2): {last_sma2}")
-            df["sma_long"] = df["close"].rolling(window=2).mean()
-        elif len(df) >= sma_long_period:
-            df["sma_long"] = df["close"].rolling(window=sma_long_period).mean()
-        else:
-            df["sma_long"] = pd.NA
-        
-        # Calculate Average Volume
-        if len(df) >= avg_vol_period:
-            df["avg_volume"] = df["volume"].rolling(window=avg_vol_period).mean()
-            logger.debug(f"Calculated Average Volume for {api_symbol}/{interval} over {avg_vol_period} periods")
-        else:
-            df["avg_volume"] = pd.NA
-            logger.debug(f"Not enough data for Average Volume calculation, need {avg_vol_period} candles, got {len(df)}")
-        
-        # Calculate ATR (Average True Range)
-        # TR = max(High - Low, abs(High - Previous_Close), abs(Low - Previous_Close))
-        if len(df) >= 2:  # Need at least 2 candles for TR calculation due to Previous_Close
-            # Calculate components of True Range
-            high_low = df["high"] - df["low"]
-            high_close_prev = abs(df["high"] - df["close"].shift(1))
-            low_close_prev = abs(df["low"] - df["close"].shift(1))
+            # Initialize with basic OHLCV data
+            df = pd.DataFrame({
+                "timestamp": [k.timestamp for k in kline_deque],
+                "open": [k.open for k in kline_deque],
+                "high": [k.high for k in kline_deque],
+                "low": [k.low for k in kline_deque],
+                "close": [k.close for k in kline_deque],
+                "volume": [k.volume for k in kline_deque],
+                "is_closed": [k.is_closed for k in kline_deque]
+            })
+            self.indicator_data[api_symbol][interval] = df
             
-            # True Range is the maximum of the three components
-            tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-            
-            # Calculate ATR as SMA of True Range
-            if len(df) >= atr_period + 1:  # +1 because first TR value will be NaN due to shift
-                df["atr"] = tr.rolling(window=atr_period).mean()
-                logger.debug(f"Calculated ATR for {api_symbol}/{interval} over {atr_period} periods")
-            else:
-                df["atr"] = pd.NA
-                logger.debug(f"Not enough data for ATR calculation, need {atr_period+1} candles, got {len(df)}")
+            # Calculate all indicators in batch
+            self.indicator_data[api_symbol][interval] = self.indicator_processor.batch_process_indicators(df)
         else:
-            df["atr"] = pd.NA
-            logger.debug(f"Not enough data for TR calculation, need at least 2 candles, got {len(df)}")
+            # Update the last candle with optimized indicators
+            latest_idx = len(df) - 1
+            self.indicator_processor.update_indicators(df, latest_idx)
+            
+    async def get_indicator_data(self, api_symbol: str, interval: str) -> pd.DataFrame:
+        """Get indicator data for a specific symbol and interval"""
+        if api_symbol not in self.indicator_data or interval not in self.indicator_data[api_symbol]:
+            # Initialize empty DataFrames
+            if api_symbol not in self.indicator_data:
+                self.indicator_data[api_symbol] = {}
+            self.indicator_data[api_symbol][interval] = pd.DataFrame()
+            
+        return self.indicator_data[api_symbol][interval]
         
-        self.indicator_data[api_symbol][interval] = df
+    async def get_latest_kline(self, api_symbol: str, interval: str) -> Optional[Kline]:
+        """Get the latest kline for a specific symbol and interval"""
+        if api_symbol not in self.kline_buffers or interval not in self.kline_buffers[api_symbol]:
+            return None
+            
+        buffer = self.kline_buffers[api_symbol][interval]
+        if not buffer:
+            return None
+            
+        return buffer[-1]
 
     def get_latest_kline(self, api_symbol: str, interval: str) -> Optional[Kline]:
         if api_symbol in self.kline_buffers and interval in self.kline_buffers[api_symbol]:
