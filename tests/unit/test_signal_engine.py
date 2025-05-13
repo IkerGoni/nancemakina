@@ -731,3 +731,132 @@ async def test_se_find_recent_pivot_logic(signal_engine_v1):
     pivot_h_flat = signal_engine_v1._find_recent_pivot(flat_df, lookback=3, direction=TradeDirection.SHORT)
     assert pivot_h_flat == 20
 
+# Tests specific to the new check_signal_with_df method
+@pytest.mark.asyncio
+async def test_check_signal_with_df_long_signal(signal_engine_v1):
+    """Test that check_signal_with_df generates a LONG signal correctly on crossover up"""
+    # Create test DataFrame with crossover up (short crosses above long)
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    
+    # Call the new method directly
+    signal = await signal_engine_v1.check_signal_with_df("ETHUSDT", "ETH_USDT", mock_df)
+    
+    # Verify signal was generated correctly
+    assert signal is not None
+    assert signal.direction == TradeDirection.LONG
+    assert signal.symbol == "ETHUSDT"
+    assert signal.config_symbol == "ETH_USDT"
+    assert signal.entry_price == 100.5  # From close_curr
+    assert signal.stop_loss_price is not None
+    assert signal.take_profit_price is not None
+    
+    # Verify the signal interval is independent of min_signal_interval_minutes
+    # (which should only be checked in the wrapper check_signal method)
+    signal_engine_v1.last_signal_time["ETHUSDT"] = time.time()  # Signal was just generated
+    
+    # Should still generate a signal (min_signal_interval is not checked in check_signal_with_df)
+    signal2 = await signal_engine_v1.check_signal_with_df("ETHUSDT", "ETH_USDT", mock_df)
+    assert signal2 is not None
+
+@pytest.mark.asyncio
+async def test_check_signal_with_df_short_signal(signal_engine_v1):
+    """Test that check_signal_with_df generates a SHORT signal correctly on crossover down"""
+    # Create test DataFrame with crossover down (short crosses below long)
+    mock_df = create_mock_df(
+        sma_short_prev=100, sma_long_prev=99, 
+        sma_short_curr=98, sma_long_curr=99, 
+        close_curr=100.5
+    )
+    
+    # Call the new method directly
+    signal = await signal_engine_v1.check_signal_with_df("ETHUSDT", "ETH_USDT", mock_df)
+    
+    # Verify signal was generated correctly
+    assert signal is not None
+    assert signal.direction == TradeDirection.SHORT
+    assert signal.symbol == "ETHUSDT"
+    assert signal.config_symbol == "ETH_USDT"
+    assert signal.entry_price == 100.5  # From close_curr
+    assert signal.stop_loss_price is not None
+    assert signal.take_profit_price is not None
+
+@pytest.mark.asyncio
+async def test_check_signal_with_df_integration_with_check_signal(signal_engine_v1, mock_data_processor_for_se):
+    """Test that check_signal properly calls check_signal_with_df with the DataFrame from DataProcessor"""
+    # Create test DataFrame with crossover up
+    mock_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    
+    # Configure DataProcessor mock to return our test DataFrame
+    mock_data_processor_for_se.get_indicator_dataframe.return_value = mock_df
+    
+    # Patch the check_signal_with_df method to check if it's called correctly
+    with patch.object(signal_engine_v1, 'check_signal_with_df', wraps=signal_engine_v1.check_signal_with_df) as wrapped_method:
+        # Call check_signal which should internally call check_signal_with_df
+        signal = await signal_engine_v1.check_signal("ETHUSDT", "ETH_USDT")
+        
+        # Verify that check_signal_with_df was called with the correct arguments
+        wrapped_method.assert_called_once()
+        args, kwargs = wrapped_method.call_args
+        assert args[0] == "ETHUSDT"
+        assert args[1] == "ETH_USDT"
+        assert args[2].equals(mock_df)  # The DataFrame should be passed unchanged
+        
+        # Verify that check_signal returned the expected signal
+        assert signal is not None
+        assert signal.direction == TradeDirection.LONG
+
+@pytest.mark.asyncio
+async def test_check_signal_with_df_varying_dataframe_size(signal_engine_v1):
+    """Test that check_signal_with_df works correctly with different sized DataFrames"""
+    # Create base test DataFrame with crossover up
+    base_df = create_mock_df(
+        sma_short_prev=99, sma_long_prev=100, 
+        sma_short_curr=101, sma_long_curr=100, 
+        close_curr=100.5
+    )
+    
+    # Add 20 more rows before the crossover to test with a larger historical context
+    extended_rows = []
+    for i in range(20):
+        timestamp = base_df.index[0] - (i+1) * 60000  # 1 minute earlier each time
+        row = {
+            'timestamp': timestamp,
+            'open': 100.0 - i*0.1,
+            'high': 101.0 - i*0.1,
+            'low': 99.0 - i*0.1,
+            'close': 100.0 - i*0.1,
+            'volume': 1000.0,
+            'sma_short': 98.0 - i*0.1,  # Keep below sma_long
+            'sma_long': 99.0 - i*0.1,
+            'is_closed': True
+        }
+        extended_rows.append(row)
+    
+    extended_df = pd.concat([
+        pd.DataFrame(extended_rows).set_index('timestamp'),
+        base_df
+    ]).sort_index()
+    
+    # Test with the extended DataFrame
+    signal_ext = await signal_engine_v1.check_signal_with_df("ETHUSDT", "ETH_USDT", extended_df)
+    
+    # Should generate the same signal as with the smaller DataFrame
+    assert signal_ext is not None
+    assert signal_ext.direction == TradeDirection.LONG
+    
+    # Verify that the stop loss calculation can use the additional historical data
+    # by checking if the SL price is potentially different (more historical lows available)
+    signal_base = await signal_engine_v1.check_signal_with_df("ETHUSDT", "ETH_USDT", base_df)
+    
+    # Both signals should be valid, though SL values might differ due to different pivot calculations
+    assert signal_base.stop_loss_price is not None
+    assert signal_ext.stop_loss_price is not None
+

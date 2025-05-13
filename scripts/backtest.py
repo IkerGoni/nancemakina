@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from pydantic import BaseModel
 import asyncio
 from decimal import Decimal, getcontext, ROUND_DOWN
+from collections import deque
 
 # Set decimal precision for financial calculations
 getcontext().prec = 28
@@ -136,84 +137,100 @@ class Backtester:
         
         # Return the dataframe with indicators
         return self.data_processor.indicator_data[symbol][interval]
-        
-    async def generate_signals(self, df: pd.DataFrame, symbol: str = "BTCUSDT", config_symbol: str = "BTC_USDT") -> List[TradeSignal]:
+
+    async def generate_full_historical_df(self, klines: List[Kline], symbol: str = "BTCUSDT", interval: str = "1m") -> pd.DataFrame:
         """
-        Generate trading signals for the historical data
-        """
-        logger.info(f"Generating signals for {symbol}")
+        Generate a complete historical DataFrame with all indicators by processing all klines
+        with an unbounded buffer (no MAX_KLINE_BUFFER_LENGTH limitation).
         
+        This provides the full historical context needed for accurate backtesting with point-in-time data.
+        """
+        logger.info(f"Generating complete historical DataFrame for {symbol} {interval} with unbounded buffer")
+        
+        # Create a temporary DataProcessor with unbounded kline buffers
+        temp_dp = DataProcessor(self.config_manager)
+        
+        # Override the maxlen of the kline buffer to be unbounded for this specific symbol and interval
+        temp_dp.kline_buffers[symbol][interval] = deque()  # No maxlen means unbounded
+        
+        # Process all klines through the temporary data processor
+        for kline in klines:
+            kline.symbol = symbol
+            kline.interval = interval
+            await temp_dp.process_kline(kline)
+        
+        # Get the complete DataFrame with all historical data
+        full_df = temp_dp.indicator_data[symbol][interval]
+        logger.info(f"Generated full historical DataFrame with {len(full_df)} rows and indicators")
+        
+        return full_df
+
+    async def generate_signals_iteratively(self, full_df: pd.DataFrame, symbol: str = "BTCUSDT", config_symbol: str = "BTC_USDT", warmup_period: int = 200) -> List[TradeSignal]:
+        """
+        Generate trading signals by iteratively checking each candle with the full historical context up to that point.
+        This simulates how the signals would have been generated with perfect point-in-time knowledge.
+        
+        Args:
+            full_df: Complete historical DataFrame with all indicators
+            symbol: Trading symbol in API format (e.g., "BTCUSDT")
+            config_symbol: Trading symbol in config format (e.g., "BTC_USDT")
+            warmup_period: Number of initial candles to skip for indicator warmup
+            
+        Returns:
+            List of generated trade signals
+        """
+        logger.info(f"Generating signals iteratively for {symbol} with full historical context")
         signals = []
         
-        # Disable the time-based filtering temporarily for backtest
-        # Store the original last_signal_time
+        # Store the original last_signal_time to restore later
         original_last_signal_time = self.signal_engine.last_signal_time.copy()
-        self.signal_engine.last_signal_time = {}
+        self.signal_engine.last_signal_time = {}  # Reset for backtest
         
-        # Add debug info about the dataframe
-        logger.info(f"DataFrame shape: {df.shape}, columns: {df.columns.tolist()}")
-        logger.info(f"First few rows of DataFrame:\n{df.head(2)}")
+        # Ensure we have enough data
+        if len(full_df) < warmup_period + 2:  # Need at least warmup + 2 candles
+            logger.warning(f"Not enough data to generate signals. Have {len(full_df)} rows, need at least {warmup_period + 2}")
+            return signals
         
-        # Add debug logging for SMA values
-        valid_sma_rows = df[pd.notna(df['sma_short']) & pd.notna(df['sma_long'])]
-        logger.info(f"Number of rows with valid SMA calculations: {len(valid_sma_rows)} out of {len(df)}")
+        # Log dataset stats
+        logger.info(f"DataFrame shape: {full_df.shape}, columns: {full_df.columns.tolist()}")
+        logger.info(f"Checking for signals from candle {warmup_period} to {len(full_df)-1}")
         
-        if len(valid_sma_rows) > 0:
-            # Log some sample rows to check for crossover potential
-            logger.info(f"First 5 valid SMA rows:\n{valid_sma_rows[['close', 'sma_short', 'sma_long']].head(5)}")
+        # Count valid SMA rows for debugging
+        valid_sma_rows = full_df[pd.notna(full_df['sma_short']) & pd.notna(full_df['sma_long'])]
+        logger.info(f"Number of rows with valid SMA calculations: {len(valid_sma_rows)} out of {len(full_df)}")
+        
+        # Iterate through each candle starting from warmup_period
+        for i in range(warmup_period + 1, len(full_df)):
+            # Create point-in-time slice of data up to and including current candle
+            point_in_time_df = full_df.iloc[:i+1]
+            current_candle = point_in_time_df.iloc[-1]
             
-            # Temporarily make the dataframe accessible to the signal engine
-            # Store the original data to restore later
-            original_df = self.data_processor.indicator_data.get(symbol, {}).get("1m", None)
-            self.data_processor.indicator_data.setdefault(symbol, {})["1m"] = valid_sma_rows
-            
-            # Iterate through each potential signal candle
-            for i in range(1, len(valid_sma_rows)):
-                current = valid_sma_rows.iloc[i]
-                previous = valid_sma_rows.iloc[i-1]
-                
-                # Log potential crossovers for debugging
-                crossed_up = (previous['sma_short'] <= previous['sma_long'] and 
-                             current['sma_short'] > current['sma_long'])
-                crossed_down = (previous['sma_short'] >= previous['sma_long'] and
-                               current['sma_short'] < current['sma_long'])
+            # Log potential crossovers for debugging (optional)
+            if i > 0:
+                previous_candle = point_in_time_df.iloc[-2]
+                crossed_up = (previous_candle['sma_short'] <= previous_candle['sma_long'] and 
+                             current_candle['sma_short'] > current_candle['sma_long'])
+                crossed_down = (previous_candle['sma_short'] >= previous_candle['sma_long'] and
+                               current_candle['sma_short'] < current_candle['sma_long'])
                 
                 if crossed_up or crossed_down:
-                    logger.debug(f"Potential crossover at index {i}, timestamp: {current.name}")
-                    logger.debug(f"Previous: short={previous['sma_short']}, long={previous['sma_long']}")
-                    logger.debug(f"Current: short={current['sma_short']}, long={current['sma_long']}")
-                    
-                    # Set up a specific slice of data for this timestamp to check for signals
-                    kline_slice = valid_sma_rows[:i+1]  # Include data up to current point only
-                    self.data_processor.indicator_data[symbol]["1m"] = kline_slice
-                    
-                    # Debug log to see the exact DataFrame state before check_signal
-                    logger.debug(f"DataFrame state right before check_signal:")
-                    df_state = self.data_processor.get_indicator_dataframe(symbol, "1m")
-                    logger.debug(f"DataFrame shape: {df_state.shape}, last 2 rows:")
-                    logger.debug(f"Previous row:\n{df_state.iloc[-2][['close', 'sma_short', 'sma_long']]}")
-                    logger.debug(f"Latest row:\n{df_state.iloc[-1][['close', 'sma_short', 'sma_long']]}")
-                    
-                    # Check for signal at this point using the signal engine
-                    signal = await self.signal_engine.check_signal(symbol, config_symbol)
-                    
-                    if signal:
-                        # Custom field to store the timestamp for the backtest simulation
-                        signal.timestamp = int(current.name)
-                        signals.append(signal)
-                        logger.info(f"Generated {signal.direction.value} signal at {datetime.fromtimestamp(current.name/1000)}")
+                    logger.debug(f"Potential crossover at index {i}, timestamp: {current_candle.name}")
+                    logger.debug(f"Previous: short={previous_candle['sma_short']}, long={previous_candle['sma_long']}")
+                    logger.debug(f"Current: short={current_candle['sma_short']}, long={current_candle['sma_long']}")
             
-            # Restore the original dataframe
-            if original_df is not None:
-                self.data_processor.indicator_data[symbol]["1m"] = original_df
-            else:
-                if symbol in self.data_processor.indicator_data and "1m" in self.data_processor.indicator_data[symbol]:
-                    del self.data_processor.indicator_data[symbol]["1m"]
+            # Use the new check_signal_with_df method with point-in-time data slice
+            signal = await self.signal_engine.check_signal_with_df(symbol, config_symbol, point_in_time_df)
+            
+            if signal:
+                # Add timestamp for the backtest simulation
+                signal.timestamp = int(current_candle.name)
+                signals.append(signal)
+                logger.info(f"Generated {signal.direction.value} signal at {datetime.fromtimestamp(current_candle.name/1000)}")
         
         # Restore the original last_signal_time
         self.signal_engine.last_signal_time = original_last_signal_time
         
-        logger.info(f"Generated {len(signals)} signals")
+        logger.info(f"Generated {len(signals)} signals using iterative point-in-time approach")
         return signals
 
     def simulate_trading(self, signals: List[TradeSignal], df: pd.DataFrame):
@@ -574,15 +591,17 @@ async def run_backtest(config_path: str, data_file: str, symbol: str = "BTCUSDT"
     # Initialize backtester
     backtester = Backtester(config_path, data_file)
     
-    # Load and process data
+    # Load historical data
     kline_objects = backtester.load_historical_data()
-    processed_df = await backtester.process_data_async(kline_objects, symbol=symbol)
     
-    # Generate signals
-    signals = await backtester.generate_signals(processed_df, symbol=symbol, config_symbol=config_symbol)
+    # Generate full historical DataFrame with all indicators
+    full_historical_df = await backtester.generate_full_historical_df(kline_objects, symbol=symbol)
     
-    # Simulate trading
-    positions, equity_curve = backtester.simulate_trading(signals, processed_df)
+    # Generate signals iteratively with point-in-time slices
+    signals = await backtester.generate_signals_iteratively(full_historical_df, symbol=symbol, config_symbol=config_symbol)
+    
+    # Simulate trading using the generated signals and full historical DataFrame
+    positions, equity_curve = backtester.simulate_trading(signals, full_historical_df)
     
     # Analyze results
     results = backtester.analyze_results()

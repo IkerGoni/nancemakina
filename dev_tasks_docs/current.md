@@ -1,75 +1,57 @@
-# Development Plan: Step 015a - Finalize Implementation of Advanced Filters (Volume & Volatility/ATR)
+# Development Plan: Step 017 - Refactor SignalEngineV1 for DataFrame Input in Backtesting
 
-**Task:** Complete the implementation of the configurable Volume filter and ATR-based Volatility filter within `SignalEngineV1`, and ensure `DataProcessor` correctly calculates and provides the necessary indicators (Average Volume, ATR).
+**Task:** Modify `SignalEngineV1` to accept a pandas DataFrame directly for signal checking, allowing the backtester to pass point-in-time historical data slices.
 
-**Objective:** Make the V1 trading strategy fully operational with optional, configurable volume and volatility confirmation filters to improve signal quality.
+**Objective:** Enable accurate backtesting by ensuring `SignalEngineV1` makes decisions based on the complete historical data available up to each specific candle being evaluated, rather than being limited by `DataProcessor`'s live-trading buffer (`MAX_KLINE_BUFFER_LENGTH`).
 
 **Target File(s):**
-*   `src/data_processor.py` (finalize Average Volume and ATR calculation in `_update_indicators`)
-*   `src/signal_engine.py` (fully implement logic in `_passes_volume_filter`, `_passes_volatility_filter`, and ensure correct integration in `check_signal` pipeline)
-*   `tests/unit/test_data_processor.py` (add/complete tests for Average Volume and ATR calculations)
-*   `tests/unit/test_signal_engine.py` (add/complete tests for the new filter logic)
-*   `scripts/backtest.py` (for end-to-end testing with these filters enabled)
+*   `src/signal_engine.py` (Modify existing `check_signal` or add new `check_signal_with_df` method)
+*   `scripts/backtest.py` (Update `generate_signals_iteratively` or equivalent to use the new/modified `SignalEngineV1` method)
+*   `tests/unit/test_signal_engine.py` (Update tests to reflect changes)
 
 **Context:**
-*   The configuration structure for Volume and Volatility filters is defined in `config.yaml.example`.
-*   `SignalEngineV1._get_pair_specific_config` is expected to load these configurations.
-*   `SignalEngineV1.check_signal` pipeline has placeholders/stubs for calling these filter methods.
-*   `DataProcessor._update_indicators` has conceptual logic for Average Volume and ATR but needs to be fully implemented and tested.
+*   The current `SignalEngineV1.check_signal` relies on its internal `self.data_processor` instance to get indicator DataFrames.
+*   `DataProcessor`'s internal buffers are capped by `MAX_KLINE_BUFFER_LENGTH` (e.g., 300 candles), which is suitable for live trading memory management but limits the historical context seen by `SignalEngineV1` during iterative backtesting over long datasets.
+*   This limitation causes the backtester to effectively only evaluate signals based on a rolling window of the most recent 300 candles of the *entire dataset processed so far by DataProcessor*, not the full history up to each specific point in time being backtested for signal generation.
+*   The result is potentially very few signals generated, or signals based on an incomplete historical view.
 
 **Detailed Plan:**
 
-1.  **Finalize `DataProcessor._update_indicators` for Average Volume and ATR:**
-    *   **Action:** In `src/data_processor.py`, within `_update_indicators`:
-        *   Retrieve `filters.volume.average_period` and `filters.volatility.atr_period` from the configuration (via `self.config_manager.get_config()`). It's important that `DataProcessor` uses the *global* settings for these indicator periods, as the indicators are calculated for all data, and `SignalEngine` will decide if/how to use them based on pair-specific filter settings. Alternatively, if indicators should vary per pair, `DataProcessor` would need to be aware of pair-specific indicator parameters, which adds complexity. For now, assume global periods for these base indicators.
-        *   Implement the rolling average volume calculation: `df['avg_volume'] = df['volume'].rolling(window=avg_vol_period).mean()`.
-        *   Implement the ATR calculation:
-            *   `high_low = df['high'] - df['low']`
-            *   `high_close_prev = abs(df['high'] - df['close'].shift(1))`
-            *   `low_close_prev = abs(df['low'] - df['close'].shift(1))`
-            *   `tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1, skipna=False)`
-            *   `df['atr'] = tr.rolling(window=atr_period).mean()`
-        *   Ensure NaNs resulting from `shift(1)` or initial rolling periods are handled (Pandas will naturally produce NaNs, which filter methods in `SignalEngine` must then check for).
-    *   **Action:** Add robust unit tests in `tests/unit/test_data_processor.py` to verify that `avg_volume` and `atr` columns are correctly calculated and match manual examples. Test edge cases like insufficient data.
+1.  **Refactor/Add Method in `SignalEngineV1` for DataFrame Input:**
+    *   **Action:** In `src/signal_engine.py`, implement the following strategy:
+        *   Create a new public method, e.g., `async def check_signal_with_df(self, api_symbol: str, config_symbol: str, point_in_time_df: pd.DataFrame) -> Optional[TradeSignal]:`.
+        *   Move the *entire core logic* from the current `async def check_signal(...)` method into this new `check_signal_with_df(...)` method.
+        *   This new method will perform all its operations (getting `latest`, `previous`, calling `_find_recent_pivot`, etc.) directly on the `point_in_time_df` passed as an argument, instead of calling `self.data_processor.get_indicator_dataframe(...)`.
+        *   Modify the original `async def check_signal(self, api_symbol: str, config_symbol: str) -> Optional[TradeSignal]:` to become a wrapper. It will now:
+            1.  Call `self.data_processor.get_indicator_dataframe(api_symbol, "1m")` to get the current DataFrame (as it does for live trading).
+            2.  Call `await self.check_signal_with_df(api_symbol, config_symbol, df_from_processor)`.
+    *   **Rationale:** This approach keeps the original `check_signal` interface for live trading (which relies on the live `DataProcessor` instance) while providing a dedicated, testable interface for the backtester to inject complete point-in-time historical data.
 
-2.  **Complete Filter Helper Methods in `SignalEngineV1`:**
-    *   **Action:** In `src/signal_engine.py`, fully implement the logic for:
-        *   `_passes_volume_filter(self, latest_kline_data: pd.Series, volume_filter_config: Dict[str, Any]) -> bool:`
-            *   Retrieve `current_volume = latest_kline_data.get('volume')` and `avg_volume = latest_kline_data.get('avg_volume')`.
-            *   Handle `pd.isna(avg_volume)` or `avg_volume == 0` (perhaps return `True` or `False` based on desired strictness, log a warning).
-            *   Compare `current_volume` with `avg_volume * volume_filter_config['threshold_ratio']`.
-            *   Log the comparison values and the outcome.
-        *   `_passes_volatility_filter(self, latest_kline_data: pd.Series, volatility_filter_config: Dict[str, Any]) -> bool:`
-            *   Retrieve `atr = latest_kline_data.get('atr')` and `close_price = latest_kline_data.get('close')`.
-            *   Handle `pd.isna(atr)` or `pd.isna(close_price)` or `close_price == 0`.
-            *   Implement logic based on `volatility_filter_config['condition_type']` and `value`.
-            *   Log comparison values and outcome.
+2.  **Update `DataProcessor` for Full History DataFrame Generation (for Backtester Use):**
+    *   **Action:** In `scripts/backtest.py` (or a helper utility if preferred), ensure there's a mechanism to create a `DataProcessor` instance *specifically for generating the full historical DataFrame with all indicators*.
+    *   This mechanism should:
+        1.  Instantiate `DataProcessor`.
+        2.  Temporarily set `MAX_KLINE_BUFFER_LENGTH` to a very large number or make the kline deques unbounded for the duration of processing the full historical dataset *for this specific DataFrame generation task only*. (e.g., `temp_dp.kline_buffers[symbol][interval] = deque()` before processing all klines, then restore original maxlen if that DP instance were to be reused, though for this task it's usually a one-off).
+        3.  Iterate through all loaded `Kline` objects from the dataset, calling `await temp_dp.process_kline(kline_obj)` for each.
+        4.  After processing all klines, retrieve the complete DataFrame using `temp_dp.get_indicator_dataframe(symbol, "1m")`. This DataFrame will contain all historical klines and their calculated indicators.
 
-3.  **Ensure Correct Integration in `SignalEngineV1.check_signal()`:**
-    *   **Action:** Verify that the calls to `_passes_volume_filter` and `_passes_volatility_filter` in the `check_signal` pipeline are correctly placed.
-    *   **Action:** Ensure that the `latest_kline_data` Series passed to these filter methods actually contains the `avg_volume` and `atr` values (i.e., `DataProcessor` has successfully added them). This implies checking if `latest_kline_data.get('avg_volume')` is not `None` before using it.
+3.  **Modify `scripts/backtest.py` to Use `check_signal_with_df`:**
+    *   **Action:** In the `generate_signals_iteratively` (or a similarly named method like `generate_signals_from_full_df`) method:
+        1.  It should first obtain the `full_historical_indicator_df` as described in step 2 above.
+        2.  Then, it will iterate from `warmup_period` to `len(full_historical_indicator_df)`.
+        3.  In each iteration `i`, it will create a slice: `point_in_time_df_slice = full_historical_indicator_df.iloc[:i+1]`. This slice represents all data available up to and including the current candle `i`.
+        4.  It will then call `await self.signal_engine.check_signal_with_df(api_symbol, config_symbol, point_in_time_df_slice)`.
+    *   **Action:** The `simulate_trading` method will continue to use the `full_historical_indicator_df` (the one containing all data) to check for SL/TP hits against market highs/lows.
 
 4.  **Update Unit Tests for `SignalEngineV1`:**
-    *   **Action:** In `tests/unit/test_signal_engine.py`:
-        *   Write specific unit tests for `_passes_volume_filter` and `_passes_volatility_filter`. Mock the `latest_kline_data` Series with various `volume`, `avg_volume`, `atr`, and `close` values, and test with different filter configurations (`enabled`, `threshold_ratio`, `condition_type`, `value`).
-        *   Expand tests for `check_signal` to include scenarios where Volume and Volatility filters are enabled.
-            *   Test cases where signals pass these filters.
-            *   Test cases where signals are rejected by these filters.
-            *   Test with missing `avg_volume` or `atr` data in the input DataFrame to ensure graceful handling.
-
-5.  **End-to-End Testing with Backtester:**
-    *   **Action:** Use `scripts/backtest.py` with various settings in `config.yaml` to enable/disable the Volume and Volatility filters and adjust their parameters.
-    *   **Action:** Observe the log output to confirm:
-        *   `DataProcessor` logs show `avg_volume` and `atr` being calculated.
-        *   `SignalEngineV1` logs show the filter checks being performed when enabled.
-        *   Signals are correctly passed or rejected based on these filter conditions.
-    *   **Action:** Analyze the impact of these filters on the backtest performance metrics (number of trades, win rate, P&L).
+    *   **Action:** Modify tests in `tests/unit/test_signal_engine.py`.
+    *   Existing tests for `check_signal` might now indirectly test `check_signal_with_df` if they mock `data_processor.get_indicator_dataframe`.
+    *   Add new tests that directly call `check_signal_with_df` with various handcrafted `point_in_time_df` DataFrames to test specific scenarios (e.g., just enough data for SMAs, data that should trigger pivots, data with active filters).
 
 **Acceptance Criteria:**
-*   `DataProcessor` accurately calculates and makes `avg_volume` and `atr` available in its output DataFrames.
-*   The Volume filter logic in `SignalEngineV1` correctly compares current volume to average volume against the configured threshold.
-*   The ATR-based Volatility filter logic in `SignalEngineV1` correctly evaluates conditions based on ATR, price, and configured type/value.
-*   Both filters can be independently enabled/disabled via `config.yaml` and their parameters adjusted.
-*   Signals are correctly filtered by these new mechanisms when they are active.
-*   Unit tests provide good coverage for the new indicator calculations in `DataProcessor` and the filter logic in `SignalEngineV1`.
-*   Backtesting demonstrates the functional application of these filters.
+*   `SignalEngineV1` has a method (e.g., `check_signal_with_df`) that accepts a pandas DataFrame as input for its signal logic.
+*   The original `SignalEngineV1.check_signal` method now uses this new method, fetching its DataFrame from `self.data_processor`.
+*   `scripts/backtest.py` generates a complete historical DataFrame with all indicators for the entire dataset.
+*   The backtester's signal generation loop iterates through this complete DataFrame, passing incrementally larger slices (point-in-time history) to `SignalEngineV1`'s new DataFrame-accepting method.
+*   Backtests run over larger datasets now generate signals based on the true historical context at each candle, rather than a limited rolling window.
+*   The number of signals generated by the backtester is more consistent with expectations for the strategy over the full dataset.
